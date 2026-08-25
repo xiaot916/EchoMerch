@@ -1,0 +1,15 @@
+{
+  "name": "mini-product-diagnosis",
+  "display_name": "MINI/尝鲜商品联动诊断",
+  "description": "按店铺商品标题识别 MINI/尝鲜装，并用商品 ID 联动成交、推广、评价、问大家、U先派样与复购数据，输出应补齐动作。",
+  "version": "1.0.0",
+  "enabled": true,
+  "domains": ["product", "reviews", "utry"],
+  "keywords": ["mini", "mini装", "MINI装", "尝鲜装", "小规格", "试用装商品"],
+  "workflow": [
+    {
+      "tool": "mini.get_diagnosis",
+      "description": "识别 MINI/尝鲜商品并按商品 ID 联动经营、反馈和 U先证据"
+    }
+  ]
+}

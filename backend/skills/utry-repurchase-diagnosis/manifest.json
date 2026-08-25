@@ -1,0 +1,15 @@
+{
+  "name": "utry-repurchase-diagnosis",
+  "display_name": "U先回购诊断",
+  "description": "基于 U先派样与回购商品快照，分析同店/同品牌 30、90、365 日回购规模、趋势、商品贡献和回购权益配置。",
+  "version": "1.0.0",
+  "enabled": true,
+  "domains": ["utry", "customer"],
+  "keywords": ["U先", "U 先", "U先回购", "U先复购", "试用回购", "派样回购"],
+  "workflow": [
+    {
+      "tool": "utry.get_repurchase_diagnosis",
+      "description": "读取 U先最新回购快照、日趋势、商品贡献和派样背景"
+    }
+  ]
+}

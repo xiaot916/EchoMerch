@@ -1,0 +1,13 @@
+{
+  "name": "period-report-generation",
+  "display_name": "日报周报月报",
+  "description": "按日报、周报、月报和 MTD 固定口径生成经营报告，并标记缺失模块。",
+  "version": "1.0.0",
+  "enabled": true,
+  "domains": ["report"],
+  "keywords": ["日报", "周报", "月报", "mtd", "经营报告", "复盘", "报表"],
+  "workflow": [
+    {"tool": "data.coverage", "description": "先核对报告数据完整性", "arguments": {"datasets": ["store_overview", "traffic_sources", "products", "customers", "members", "live", "promotion_campaigns", "brand_zone", "cps", "bybt"]}},
+    {"tool": "reports.build_period_report", "description": "生成兼容的经营报告视图"}
+  ]
+}

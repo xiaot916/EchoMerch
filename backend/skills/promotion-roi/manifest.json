@@ -1,0 +1,12 @@
+{
+  "name": "promotion-roi",
+  "display_name": "推广 ROI 诊断",
+  "description": "诊断推广场景和计划投入产出并给出预算动作。",
+  "version": "1.0.0",
+  "enabled": true,
+  "domains": ["promotion"],
+  "keywords": ["推广", "投放", "roi", "投入产出", "渠道", "来源", "场景", "加预算", "增预算", "降预算", "扩量", "预算复盘", "花费调整", "关键词", "人群", "计划"],
+  "workflow": [
+    {"tool": "promotions.get_efficiency", "description": "先汇总全量推广场景和计划投入产出"}
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "review-diagnosis",
+  "display_name": "评价与用户反馈诊断",
+  "description": "分析评价问题、风险商品/系列和问大家未回答需求，并与商品经营证据联动。",
+  "version": "1.0.0",
+  "enabled": true,
+  "domains": ["reviews"],
+  "keywords": ["评价", "差评", "口碑", "用户反馈", "问大家", "评论", "质量问题"],
+  "workflow": [{"tool": "reviews.get_diagnosis", "description": "读取评价问题、风险商品系列和问大家承接情况"}]
+}

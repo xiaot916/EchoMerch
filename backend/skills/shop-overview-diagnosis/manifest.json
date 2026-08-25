@@ -1,0 +1,14 @@
+{
+  "name": "shop-overview-diagnosis",
+  "display_name": "店铺经营诊断",
+  "description": "诊断成交、流量、转化、退款和推广效率变化。",
+  "version": "1.0.0",
+  "enabled": true,
+  "domains": ["overview"],
+  "keywords": ["成交", "经营", "支付", "销售", "转化", "退款", "昨天", "昨日", "今天"],
+  "workflow": [
+    {"tool": "overview.get_store_summary", "description": "汇总支付、退款、推广费用和经营费比"},
+    {"tool": "overview.get_metric_trend", "description": "读取核心指标按日趋势"},
+    {"tool": "data.compare_periods", "description": "比较核心经营指标", "arguments": {"dataset": "store_overview", "measures": ["gmv", "visitors", "buyers", "refund_amount"]}}
+  ]
+}

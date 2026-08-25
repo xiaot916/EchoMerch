@@ -1,0 +1,10 @@
+{
+  "name": "product-structure-diagnosis",
+  "display_name": "商品结构诊断",
+  "description": "按系列、类型和商品拆解客单价变化及买家结构贡献。",
+  "version": "1.0.0",
+  "enabled": true,
+  "domains": ["product", "overview"],
+  "keywords": ["客单价", "客单", "客价", "系列", "类型", "商品结构", "下钻客单价"],
+  "workflow": [{"tool": "products.get_structure_profile", "description": "比较商品排行和商品主档的当前/上一周期结构"}]
+}

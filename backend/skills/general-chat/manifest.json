@@ -1,0 +1,9 @@
+{
+  "name": "general-chat",
+  "display_name": "通用对话",
+  "description": "处理寒暄、能力咨询和非经营类追问，不调用任何数据工具。",
+  "version": "1.0.0",
+  "enabled": true,
+  "domains": [],
+  "keywords": ["你好", "您好", "在吗", "hello", "hi", "hey", "怎么问", "怎么用", "能做什么", "可以做什么", "聊聊"]
+}

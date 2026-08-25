@@ -1,0 +1,31 @@
+{
+  "name": "market-insight",
+  "display_name": "市场洞察",
+  "description": "先审计市场覆盖，再分析关键词机会、竞品异动，并与本店商品经营数据匹配，识别可验证的选品、内容、投放与库存机会。",
+  "version": "1.1.0",
+  "enabled": true,
+  "domains": ["market"],
+  "keywords": ["市场", "市场洞察", "竞品", "竞争", "行业", "类目", "趋势", "搜索词", "关键词机会", "头部店铺", "头部商品", "市场机会", "竞品分析"],
+  "workflow": [
+    {
+      "tool": "market.get_insights",
+      "description": "读取平台市场排行、搜索词和覆盖状态",
+      "arguments": {"rank_type": "all", "keyword_type": "all", "limit": 40}
+    },
+    {
+      "tool": "market.get_keyword_opportunities",
+      "description": "筛选类目相关的关键词需求信号并保留趋势证据",
+      "arguments": {"keyword_type": "all", "include_unrelated": false, "limit": 20}
+    },
+    {
+      "tool": "market.get_competitor_movements",
+      "description": "读取店铺、商品和内容的排名异动样本",
+      "arguments": {"rank_type": "all", "direction": "all", "limit": 20}
+    },
+    {
+      "tool": "market.match_store_products",
+      "description": "把市场需求信号与本店商品主档、访客和支付转化对照",
+      "arguments": {"limit": 20}
+    }
+  ]
+}

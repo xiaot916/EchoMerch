@@ -1,0 +1,10 @@
+{
+  "name": "customer-service-diagnosis",
+  "display_name": "客服经营诊断",
+  "description": "分析客服销售、咨询接待漏斗、响应满意度和客服账号表现。",
+  "version": "1.0.0",
+  "enabled": true,
+  "domains": ["customer-service"],
+  "keywords": ["客服", "咨询", "接待", "询单", "响应", "满意率", "旺旺", "客服成交", "客服表现"],
+  "workflow": [{"tool": "customer_service.get_diagnosis", "description": "读取客服总盘、日趋势、咨询漏斗和账号明细"}]
+}

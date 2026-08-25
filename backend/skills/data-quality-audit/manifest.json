@@ -1,0 +1,13 @@
+{
+  "name": "data-quality-audit",
+  "display_name": "数据完整性审计",
+  "description": "检查业务数据集覆盖率、未采集日期和平台确认无数据，给出补采优先级。",
+  "version": "1.0.0",
+  "enabled": true,
+  "domains": ["data-quality"],
+  "keywords": ["缺失", "缺口", "完整", "覆盖", "补采", "漏数", "数据质量"],
+  "workflow": [
+    {"tool": "data.coverage", "description": "审计全部已注册业务数据集"},
+    {"tool": "data.freshness", "description": "检查最新业务日和数据延迟"}
+  ]
+}

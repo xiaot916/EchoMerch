@@ -1,0 +1,10 @@
+{
+  "name": "product-diagnosis",
+  "display_name": "商品经营诊断",
+  "description": "识别主销商品、低转化商品和商品流量承接问题，输出商品优化动作。",
+  "version": "1.0.0",
+  "enabled": true,
+  "domains": ["product"],
+  "keywords": ["商品", "货品", "sku", "主销", "爆款", "商品排行", "商品转化"],
+  "workflow": [{"tool": "data.query", "description": "按商品聚合成交和承接指标", "arguments": {"dataset": "products", "dimensions": ["product_id", "product_name"], "measures": ["gmv", "buyers", "visitors", "add_cart_users", "favorite_users"], "order_by": ["-gmv"], "limit": 100}}]
+}

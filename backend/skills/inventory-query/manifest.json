@@ -1,0 +1,10 @@
+{
+  "name": "inventory-query",
+  "display_name": "库存查询",
+  "description": "查询普通 SKU 与组合品库存；组合品严格按仓库组成 SKU 的最小可组套数计算。",
+  "version": "1.0.0",
+  "enabled": true,
+  "domains": ["inventory"],
+  "keywords": ["库存", "组合品", "组多少", "缺货", "断货", "可用量", "现货"],
+  "workflow": [{"tool": "inventory.query", "description": "查询最新库存快照并计算组合品可组套库存"}]
+}

@@ -1,0 +1,61 @@
+{
+  "name": "campaign-planning",
+  "display_name": "年度与活动规划",
+  "description": "把年度、月度和大促目标拆解到阶段、渠道、商品和费用，并给出可验证的运营动作。",
+  "version": "1.0.0",
+  "enabled": true,
+  "domains": ["planning", "budget"],
+  "keywords": ["年度规划", "月度规划", "活动规划", "大促规划", "618", "双11", "双十一", "活动目标", "销售目标", "目标拆解", "阶段目标", "渠道目标", "商品规划", "活动复盘"],
+  "workflow": [
+    {
+      "tool": "data.coverage",
+      "description": "先核对规划所依赖的数据覆盖",
+      "arguments": {"datasets": ["store_overview", "traffic_sources", "products", "customers", "members", "live", "promotion_campaigns", "content", "cps", "bybt"], "history_scope": "all"}
+    },
+    {
+      "tool": "data.query",
+      "description": "按日期汇总历史经营基线",
+      "arguments": {"dataset": "store_overview", "dimensions": ["date"], "measures": ["gmv", "visitors", "buyers", "payment_conversion_rate", "customer_unit_price"], "order_by": ["date"], "limit": 1000, "history_scope": "all"}
+    },
+    {
+      "tool": "data.query",
+      "description": "按一级来源形成互斥渠道基线",
+      "arguments": {"dataset": "traffic_sources", "dimensions": ["source"], "measures": ["gmv", "visitors", "buyers", "new_visitors"], "order_by": ["-gmv"], "limit": 100, "history_scope": "all"}
+    },
+    {
+      "tool": "data.query",
+      "description": "按渠道场景和商品识别可复用的增长来源",
+      "arguments": {"dataset": "promotion_campaigns", "dimensions": ["scene"], "measures": ["spend", "gmv", "buyers", "roi", "new_buyer_share"], "order_by": ["-gmv"], "limit": 100, "history_scope": "all"}
+    },
+    {
+      "tool": "data.query",
+      "description": "按商品识别主销、增长和承接风险",
+      "arguments": {"dataset": "products", "dimensions": ["product_id", "product_name"], "measures": ["gmv", "buyers", "visitors", "refund_amount"], "order_by": ["-gmv"], "limit": 100, "history_scope": "all"}
+    },
+    {
+      "tool": "data.query",
+      "description": "读取会员渠道叠加指标",
+      "arguments": {"dataset": "members", "measures": ["gmv", "member_buyers", "new_members"], "history_scope": "all"}
+    },
+    {
+      "tool": "data.query",
+      "description": "读取直播渠道叠加指标",
+      "arguments": {"dataset": "live", "measures": ["gmv", "shop_gmv", "visitors"], "history_scope": "all"}
+    },
+    {
+      "tool": "data.query",
+      "description": "读取 CPS 成交与费用叠加指标",
+      "arguments": {"dataset": "cps", "measures": ["payment_gmv", "settlement_gmv", "payment_commission", "payment_service_fee", "settlement_expense"], "history_scope": "all"}
+    },
+    {
+      "tool": "data.query",
+      "description": "读取补贴渠道叠加指标",
+      "arguments": {"dataset": "bybt", "measures": ["gmv", "buyers"], "history_scope": "all"}
+    },
+    {
+      "tool": "data.query",
+      "description": "读取内容种草叠加指标",
+      "arguments": {"dataset": "content", "measures": ["gmv", "visitors", "buyers", "interactions"], "history_scope": "all"}
+    }
+  ]
+}

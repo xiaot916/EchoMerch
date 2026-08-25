@@ -1,0 +1,35 @@
+{
+  "name": "promotion-budget-planning",
+  "display_name": "推广预算拆解",
+  "description": "按场景、计划、商品和日期拆解投放预算，并结合历史 ROI 给出可验证的调配建议。",
+  "version": "1.0.0",
+  "enabled": true,
+  "domains": ["promotion", "budget"],
+  "keywords": ["预算拆解", "预算规划", "预算分配", "预算节奏", "预算结构", "投放规划", "投放预算", "预算怎么分", "预算怎么拆", "目标ROI", "目标投产", "预算调整"],
+  "workflow": [
+    {
+      "tool": "data.query",
+      "description": "按推广场景汇总历史花费、成交和效率",
+      "arguments": {
+        "dataset": "promotion_campaigns",
+        "dimensions": ["scene"],
+        "measures": ["spend", "gmv", "direct_gmv", "buyers", "roi", "direct_roi", "ctr", "click_conversion_rate", "buyer_cost"],
+        "order_by": ["-spend"],
+        "limit": 100,
+        "history_scope": "all"
+      }
+    },
+    {
+      "tool": "data.query",
+      "description": "按日期形成预算节奏参考",
+      "arguments": {
+        "dataset": "promotion_campaigns",
+        "dimensions": ["date"],
+        "measures": ["spend", "gmv", "roi"],
+        "order_by": ["date"],
+        "limit": 1000,
+        "history_scope": "all"
+      }
+    }
+  ]
+}

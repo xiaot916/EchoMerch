@@ -1,0 +1,10 @@
+{
+  "name": "data-exploration",
+  "display_name": "通用数据探索",
+  "description": "面向任意业务数据集的结构化探索，先查目录和数据，再决定是否下钻业务 Skill。",
+  "version": "1.0.0",
+  "enabled": true,
+  "domains": ["data"],
+  "keywords": ["查询", "数据", "明细", "排行", "分析", "看下", "探索"],
+  "workflow": [{"tool": "data.catalog", "description": "读取可查询数据目录"}]
+}

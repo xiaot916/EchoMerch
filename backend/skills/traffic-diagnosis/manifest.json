@@ -1,0 +1,16 @@
+{
+  "name": "traffic-diagnosis",
+  "display_name": "流量诊断",
+  "description": "诊断流量来源规模、转化质量、UV 价值和扩量机会。",
+  "version": "1.0.0",
+  "enabled": true,
+  "domains": ["traffic"],
+  "keywords": ["流量", "来源", "访客", "uv", "渠道", "回访"],
+  "workflow": [
+    {
+      "tool": "data.query",
+      "description": "按一级来源聚合流量质量",
+      "arguments": {"dataset": "traffic_sources", "dimensions": ["source"], "measures": ["visitors", "new_visitors", "buyers", "gmv", "add_cart_users", "favorite_users"], "order_by": ["-gmv"], "limit": 100}
+    }
+  ]
+}
