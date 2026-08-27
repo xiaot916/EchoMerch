@@ -1133,12 +1133,14 @@ export async function startDailyCollection(request: {
   datasetNames?: string[]
   sessionSource?: string
   refreshExisting?: boolean
+  resumeFromLatest?: boolean
 }): Promise<CollectionBatch> {
   return apiPost<CollectionBatch>("/api/v1/imports/collect", {
     day: request.day,
     dataset_names: request.datasetNames ?? [],
     session_source: request.sessionSource ?? "drissionpage",
     refresh_existing: request.refreshExisting ?? false,
+    resume_from_latest: request.resumeFromLatest ?? true,
   })
 }
 

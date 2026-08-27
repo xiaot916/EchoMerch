@@ -130,6 +130,44 @@ def test_resume_from_latest_replays_late_arriving_detail_window(tmp_path) -> Non
     assert "--refresh-existing" in command
 
 
+def test_resume_from_latest_replays_a_recent_gap_before_newest_day(tmp_path) -> None:
+    database = collect_daily.LocalDatabase(tmp_path / "warehouse-gap.sqlite3")
+    database.initialize_schema()
+    collect_daily.CrawlRunStore(database.database_path).ensure_store_reference(
+        store_id=1,
+        store_name="Store 1",
+        platform_store_id="store-1",
+    )
+    with database.connect(initialize=True) as conn:
+        for business_day in (
+            "2026-08-20", "2026-08-21", "2026-08-22", "2026-08-23",
+            "2026-08-24", "2026-08-26",
+        ):
+            conn.execute(
+                '''
+                insert into store_daily_overviews ("店铺ID", "业务日期")
+                values (?, ?)
+                ''',
+                (1, business_day),
+            )
+        conn.commit()
+
+    spec = collect_daily.DATASET_BY_NAME["sycm_overviews"]
+    command = collect_daily._commands_for_spec(
+        spec,
+        day=date(2026, 8, 26),
+        database_path=database.database_path,
+        session_source="drissionpage",
+        cookie_env="SYCM_COOKIE",
+        browser_port=9222,
+        refresh_existing=False,
+        resume_from_latest=True,
+    )[0]
+
+    assert command[command.index("--start") + 1] == "2026-08-25"
+    assert command[command.index("--end") + 1] == "2026-08-26"
+
+
 def test_timed_out_child_closes_its_crawl_ledger(monkeypatch, tmp_path) -> None:
     cleanup_calls = []
 

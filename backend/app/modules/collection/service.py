@@ -606,6 +606,7 @@ class CollectionService:
              and d.{q(BUSINESS_DAY)} = ?
             where r.{q(CRAWL_TASK_TYPE)} in ({placeholders})
               and r.{q(START_DAY)} <= ? and r.{q(END_DAY)} >= ?
+              and coalesce(d.{q(DAY_STATUS)}, '') <> 'skipped_existing'
               {started_filter}
             order by datetime(r.{q(STARTED_AT)}) desc
             """,

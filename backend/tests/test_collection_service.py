@@ -139,6 +139,41 @@ def test_dataset_coverage_distinguishes_complete_partial_and_no_data(
     assert no_data.status == "no_data"
 
 
+def test_skipped_existing_does_not_hide_an_explicit_no_data_day(tmp_path: Path) -> None:
+    database_path = tmp_path / "skipped-existing-coverage.sqlite3"
+    database = LocalDatabase(database_path)
+    database.initialize_schema()
+    runs = CrawlRunStore(database_path)
+    runs.ensure_store_reference(store_id=1, store_name="Store 1", platform_store_id="p-1")
+    day = date(2026, 8, 26)
+    for status in ("no_data", "skipped_existing"):
+        run_id = runs.create_run(
+            store_id=1,
+            task_type="sycm_bybt_items",
+            start_day=day,
+            end_day=day,
+            mode="backfill",
+            planned_days=1,
+            log_file=tmp_path / f"{status}.jsonl",
+        )
+        runs.record_day(run_id=run_id, store_id=1, business_day=day, status=status, metric_count=0)
+        runs.finish_run(
+            run_id=run_id,
+            status="completed",
+            success_days=1 if status == "no_data" else 0,
+            skipped_days=1 if status == "skipped_existing" else 0,
+            failed_days=0,
+        )
+    service = CollectionService(database_path)
+    with database.connect() as conn:
+        coverage = service._dataset_coverage(
+            conn,
+            COLLECTION_DATASET_BY_KEY["sycm_bybt_items"],
+            day,
+        )
+    assert coverage.status == "no_data"
+
+
 def test_bybt_placeholder_overview_is_missing_not_complete(tmp_path: Path) -> None:
     database_path = tmp_path / "bybt-coverage.sqlite3"
     database = LocalDatabase(database_path)

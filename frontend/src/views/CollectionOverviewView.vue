@@ -114,7 +114,7 @@ async function collect(datasetNames?: string[], refreshExisting = false): Promis
         return
       }
     }
-    const batch = await startDailyCollection({ day: selectedDay.value, datasetNames: requestedDatasets, sessionSource: "drissionpage", refreshExisting })
+    const batch = await startDailyCollection({ day: selectedDay.value, datasetNames: requestedDatasets, sessionSource: "drissionpage", refreshExisting, resumeFromLatest: true })
     actionNotice.value = `已创建补采批次 ${batch.batch_id}，目标日 ${selectedDay.value}，正在后台处理。`
     await load()
   } catch (requestError) {

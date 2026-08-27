@@ -308,10 +308,88 @@ def _resume_start_day(
 ) -> date:
     latest = _latest_completed_day(spec=spec, database_path=database_path)
     next_after_latest = latest + timedelta(days=1) if latest else day
+    # A later successful day does not prove that every earlier day landed.
+    # Inspect a short trailing window so a missed day such as yesterday can be
+    # replayed even when the database already contains a newer report.
+    audit_start = (
+        _earliest_uncovered_day(
+            spec=spec,
+            day=day,
+            database_path=database_path,
+            window_days=max(7, mutable_refresh_days),
+        )
+        if spec.name not in LATE_ARRIVING_DATASET_NAMES
+        else None
+    )
+    if audit_start is not None:
+        next_after_latest = min(next_after_latest, audit_start)
     if spec.name not in LATE_ARRIVING_DATASET_NAMES or mutable_refresh_days <= 1:
         return min(next_after_latest, day)
     trailing_start = day - timedelta(days=mutable_refresh_days - 1)
     return min(next_after_latest, trailing_start)
+
+
+def _earliest_uncovered_day(
+    *,
+    spec: DatasetSpec,
+    day: date,
+    database_path: Path,
+    window_days: int,
+) -> date | None:
+    """Find the first unaccounted day in the recent audit window.
+
+    The crawl ledger is authoritative for explicit ``no_data`` responses;
+    otherwise every owned table must contain at least one row for the day.
+    This catches holes that a simple ``max(business_day)`` check would skip.
+    """
+    dataset = COLLECTION_DATASET_BY_KEY.get(spec.name)
+    if dataset is None or not database_path.exists() or window_days < 1:
+        return None
+    database = LocalDatabase(database_path)
+    start = day - timedelta(days=window_days - 1)
+    try:
+        with database.connect() as conn:
+            for candidate in (start + timedelta(days=offset) for offset in range(window_days)):
+                if dataset.task_types:
+                    placeholders = ",".join("?" for _ in dataset.task_types)
+                    rows = conn.execute(
+                        f"""
+                        select {q(CRAWL_TASK_TYPE)} as task_type,
+                               max({q(DAY_STATUS)}) as day_status
+                        from crawl_runs r
+                        inner join crawl_run_days d
+                          on d.{q(CRAWL_RUN_ID)} = r.{q(CRAWL_RUN_ID)}
+                        where d.{q(STORE_ID)} = ?
+                          and d.{q(BUSINESS_DAY)} = ?
+                          and r.{q(CRAWL_TASK_TYPE)} in ({placeholders})
+                          and d.{q(DAY_STATUS)} in ('ingested', 'no_data')
+                        group by {q(CRAWL_TASK_TYPE)}
+                        """,
+                        (1, candidate.isoformat(), *dataset.task_types),
+                    ).fetchall()
+                    if len(rows) == len(dataset.task_types):
+                        continue
+                table_covered = True
+                for table in dataset.tables:
+                    exists = conn.execute(
+                        "select 1 from sqlite_master where type = 'table' and name = ?",
+                        (table,),
+                    ).fetchone()
+                    if exists is None:
+                        table_covered = False
+                        break
+                    row = conn.execute(
+                        f"select 1 from {q(table)} where {q(STORE_ID)} = ? and {q(BUSINESS_DAY)} = ? limit 1",
+                        (1, candidate.isoformat()),
+                    ).fetchone()
+                    if row is None:
+                        table_covered = False
+                        break
+                if not table_covered:
+                    return candidate
+    except Exception:
+        return None
+    return None
 
 
 def _commands_for_spec(

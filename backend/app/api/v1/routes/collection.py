@@ -82,6 +82,7 @@ def start_collection(
             session_source=request.session_source,
             refresh_existing=request.refresh_existing,
             trigger="manual",
+            resume_from_latest=request.resume_from_latest,
         )
     except (
         CollectionBatchConflict,

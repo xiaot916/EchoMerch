@@ -159,6 +159,10 @@ class StartCollectionRequest(BaseModel):
     dataset_names: list[str] = Field(default_factory=list)
     session_source: str = "drissionpage"
     refresh_existing: bool = False
+    # Manual collection uses the same per-dataset catch-up planner as the
+    # scheduler. This is important for delayed reports whose first response
+    # may contain only a partial metric bundle.
+    resume_from_latest: bool = True
 
 
 class UpdateCollectionScheduleRequest(BaseModel):
