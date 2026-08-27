@@ -4769,6 +4769,7 @@ body {
 .collection-dataset-row small, .dataset-name-cell span { overflow: hidden; color: #98a2b3; text-overflow: ellipsis; white-space: nowrap; }
 .dataset-name-cell strong { font-size: 12px; }
 .dataset-name-cell small { color: #b45d4b; }
+.dataset-name-cell small.collection-action-state { display: inline-flex; width: max-content; max-width: 100%; align-items: center; overflow: hidden; color: #356ae6; font-weight: 650; text-overflow: ellipsis; }
 .dataset-name-cell small.dataset-mode-badge { overflow: hidden; color: #27745b; font-size: 9px; font-weight: 650; line-height: 1.35; white-space: normal; text-overflow: clip; }
 .collection-dataset-row .collection-status-detail { display: -webkit-box; line-height: 1.4; max-height: 2.8em; overflow: hidden; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .collection-status-detail.has-error { color: #b45d4b; }
