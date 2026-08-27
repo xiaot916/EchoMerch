@@ -103,6 +103,7 @@ class CollectionService:
         session_source: str,
         refresh_existing: bool,
         trigger: str,
+        resume_from_latest: bool = False,
     ) -> CollectionBatch:
         self.database.initialize_schema()
         names = self._validate_dataset_names(dataset_names)
@@ -163,6 +164,8 @@ class CollectionService:
             command.extend(["--promotion-refresh-days", "15"])
         if refresh_existing:
             command.append("--refresh-existing")
+        if resume_from_latest:
+            command.append("--resume-from-latest")
         log_handle = log_path.open("a", encoding="utf-8")
         try:
             process = subprocess.Popen(
@@ -262,36 +265,20 @@ class CollectionService:
         target_day = current.date() - timedelta(days=1)
         if schedule.last_triggered_day == target_day.isoformat():
             return None
-        # A daily run should be incremental for a new day, but it must retry
-        # datasets that are already partially present.  Several child workers
-        # skip an entire day when their primary table exists, which would leave
-        # a companion table permanently missing unless we explicitly refresh
-        # the attention set.
+        # Daily collection resumes from each dataset's own completed coverage,
+        # rather than assuming that a dataset complete on ``target_day`` has
+        # no historical gap.  The child planner keeps this bounded and also
+        # refreshes the short report-latency window for delayed platforms.
         coverage = self.overview(target_day=target_day, recent_day_count=1)
         attention_items = [
             item for item in coverage.datasets
             if item.status not in {"complete", "no_data"}
         ]
-        attention = {item.key for item in attention_items}
-        promotion_names = {
-            "cps_overviews",
-            "brandsearch_reports",
-            "alimama_campaigns",
-            "alimama_crowds",
-            "alimama_promotion_details",
-            "alimama_adgroup_bidwords",
-        }
-        coverage_snapshot_names = set(COVERAGE_SNAPSHOT_DATASET_NAMES)
-        selected_names = [
-            name for name in schedule.dataset_names
-            if name in attention or name in promotion_names or name in coverage_snapshot_names
-        ]
+        selected_names = list(schedule.dataset_names)
         refresh_existing = any(
             item.key in selected_names and item.status == "partial"
             for item in attention_items
         )
-        if not selected_names:
-            selected_names = list(schedule.dataset_names)
         try:
             batch = self.start_batch(
                 business_day=target_day,
@@ -299,6 +286,7 @@ class CollectionService:
                 session_source=schedule.session_source,
                 refresh_existing=refresh_existing,
                 trigger="schedule",
+                resume_from_latest=True,
             )
         except CollectionBatchConflict:
             return None

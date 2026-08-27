@@ -57,6 +57,10 @@ def fetch_sycm_bybt_items(
         headers={
             "accept": "*/*", "accept-language": "zh-CN,zh;q=0.9,en;q=0.8", "bx-v": "2.5.37",
             "cache-control": "no-cache", "cookie": cookie,
+            # The item endpoint is served from the BYBT command-center card.
+            # Without this page context it can return a successful but empty
+            # page for historical days even when the browser lists items.
+            "onetrace-card-id": "%E4%BD%9C%E6%88%98%E5%AE%A4%7C%E7%99%BE%E4%BA%BF%E8%A1%A5%E8%B4%B4",
             "referer": "https://sycm.taobao.com/xsite/frame/bybt?from=bybtzd",
             "sec-fetch-dest": "empty", "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin",
             "sycm-referer": "/xsite/frame/bybt",

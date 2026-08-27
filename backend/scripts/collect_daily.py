@@ -25,6 +25,16 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from app.core.business_days import parse_business_day, yesterday_in_shanghai  # noqa: E402
 from app.core.config import settings  # noqa: E402
+from app.core.local_database import (  # noqa: E402
+    BUSINESS_DAY,
+    CRAWL_RUN_ID,
+    CRAWL_TASK_TYPE,
+    DAY_STATUS,
+    STORE_ID,
+    LocalDatabase,
+    q,
+)
+from app.modules.collection.registry import COLLECTION_DATASET_BY_KEY  # noqa: E402
 from app.modules.imports.crawl_run_store import CrawlRunStore  # noqa: E402
 
 
@@ -115,6 +125,17 @@ ALWAYS_REFRESH_DATASET_NAMES = frozenset({
     "taobao_operational_snapshots",
     "sycm_activity_calendar",
 })
+# These source reports can land after the first daily run.  Replaying their
+# short trailing window avoids a transient empty response becoming permanent,
+# while the per-worker upsert keeps the retry idempotent.
+LATE_ARRIVING_DATASET_NAMES = frozenset({
+    "sycm_bybt",
+    "sycm_bybt_items",
+    "sycm_new_customer_discount",
+    "mtop_content_overviews",
+    "taobao_flash_sales",
+    "taobao_flash_sale_items",
+})
 
 
 def _parse_day_argument(value: str) -> date:
@@ -147,6 +168,7 @@ def build_child_command(
     spec: DatasetSpec,
     *,
     day: date,
+    start_day: date | None = None,
     database_path: Path,
     session_source: str,
     cookie_env: str,
@@ -155,7 +177,7 @@ def build_child_command(
     promotion_refresh_days: int = 0,
 ) -> list[str]:
     effective_cookie_env = "DATABANK_COOKIE" if spec.name == "databank_daily" and cookie_env == "SYCM_COOKIE" else cookie_env
-    range_start = day
+    range_start = start_day or day
     range_end = day
     rolling_promotion = spec.name in PROMOTION_DATASET_NAMES and promotion_refresh_days > 1
     if rolling_promotion:
@@ -203,6 +225,95 @@ def build_child_command(
     return command
 
 
+def _latest_completed_day(
+    *,
+    spec: DatasetSpec,
+    database_path: Path,
+    store_id: int = 1,
+) -> date | None:
+    """Return the newest persisted or explicitly no-data day for one dataset.
+
+    The coverage ledger matters here: an explicit platform ``no_data`` result
+    has no table row for detail datasets, but it is still a completed day and
+    must not make the scheduler replay the entire history.
+    """
+
+    dataset = COLLECTION_DATASET_BY_KEY.get(spec.name)
+    if dataset is None or not database_path.exists():
+        return None
+    database = LocalDatabase(database_path)
+    try:
+        with database.connect() as conn:
+            table_latest_days: list[date] = []
+            for table in dataset.tables:
+                exists = conn.execute(
+                    "select 1 from sqlite_master where type = 'table' and name = ?",
+                    (table,),
+                ).fetchone()
+                if exists is None:
+                    continue
+                row = conn.execute(
+                    f"select max({q(BUSINESS_DAY)}) as latest_day from {q(table)} "
+                    f"where {q(STORE_ID)} = ?",
+                    (store_id,),
+                ).fetchone()
+                if row and row["latest_day"]:
+                    table_latest_days.append(date.fromisoformat(str(row["latest_day"])))
+            candidates: list[date] = []
+            ledger_latest: dict[str, date] = {}
+            if dataset.task_types:
+                placeholders = ",".join("?" for _ in dataset.task_types)
+                rows = conn.execute(
+                    f"""
+                    select r.{q(CRAWL_TASK_TYPE)} as task_type,
+                           max(d.{q(BUSINESS_DAY)}) as latest_day
+                    from crawl_run_days d
+                    inner join crawl_runs r
+                      on r.{q(CRAWL_RUN_ID)} = d.{q(CRAWL_RUN_ID)}
+                    where d.{q(STORE_ID)} = ?
+                      and r.{q(CRAWL_TASK_TYPE)} in ({placeholders})
+                      and d.{q(DAY_STATUS)} in ('ingested', 'no_data')
+                    group by r.{q(CRAWL_TASK_TYPE)}
+                    """,
+                    (store_id, *dataset.task_types),
+                ).fetchall()
+                ledger_latest = {
+                    str(row["task_type"]): date.fromisoformat(str(row["latest_day"]))
+                    for row in rows
+                    if row["latest_day"]
+                }
+            if len(dataset.tables) == 1 and table_latest_days:
+                candidates.append(max(table_latest_days))
+            elif table_latest_days:
+                # A multi-table dataset is only caught up through its oldest
+                # persisted component day. Using the maximum would skip a
+                # companion table that is still behind.
+                candidates.append(min(table_latest_days))
+            if ledger_latest and all(task_type in ledger_latest for task_type in dataset.task_types):
+                ledger_day = max(ledger_latest.values()) if len(dataset.tables) == 1 else min(ledger_latest.values())
+                candidates.append(ledger_day)
+    except Exception:
+        # Scheduling a new report day must remain available if an older local
+        # database cannot yet expose a coverage table.
+        return None
+    return max(candidates, default=None)
+
+
+def _resume_start_day(
+    *,
+    spec: DatasetSpec,
+    day: date,
+    database_path: Path,
+    mutable_refresh_days: int,
+) -> date:
+    latest = _latest_completed_day(spec=spec, database_path=database_path)
+    next_after_latest = latest + timedelta(days=1) if latest else day
+    if spec.name not in LATE_ARRIVING_DATASET_NAMES or mutable_refresh_days <= 1:
+        return min(next_after_latest, day)
+    trailing_start = day - timedelta(days=mutable_refresh_days - 1)
+    return min(next_after_latest, trailing_start)
+
+
 def _commands_for_spec(
     spec: DatasetSpec,
     *,
@@ -213,15 +324,33 @@ def _commands_for_spec(
     browser_port: int,
     refresh_existing: bool,
     promotion_refresh_days: int = 0,
+    resume_from_latest: bool = False,
+    mutable_refresh_days: int = 4,
 ) -> list[list[str]]:
+    start_day = (
+        _resume_start_day(
+            spec=spec,
+            day=day,
+            database_path=database_path,
+            mutable_refresh_days=mutable_refresh_days,
+        )
+        if resume_from_latest
+        else day
+    )
+    retry_recent = (
+        resume_from_latest
+        and spec.name in LATE_ARRIVING_DATASET_NAMES
+        and start_day < day
+    )
     command = build_child_command(
         spec,
         day=day,
+        start_day=start_day,
         database_path=database_path,
         session_source=session_source,
         cookie_env=cookie_env,
         browser_port=browser_port,
-        refresh_existing=refresh_existing,
+        refresh_existing=refresh_existing or retry_recent,
         promotion_refresh_days=promotion_refresh_days,
     )
     if spec.name not in {"alimama_adgroup_bidwords", "alimama_promotion_details"}:
@@ -285,6 +414,8 @@ def run_collection(
     fail_fast: bool = False,
     timeout: int | None = None,
     promotion_refresh_days: int = 0,
+    resume_from_latest: bool = False,
+    mutable_refresh_days: int = 4,
 ) -> tuple[int, dict[str, object]]:
     specs = selected_specs(dataset_names)
     started_at = datetime.now().astimezone()
@@ -301,6 +432,8 @@ def run_collection(
             browser_port=browser_port,
             refresh_existing=refresh_existing,
             promotion_refresh_days=promotion_refresh_days,
+            resume_from_latest=resume_from_latest,
+            mutable_refresh_days=mutable_refresh_days,
         ):
             detail = (
                 command[-1]
@@ -408,6 +541,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=0,
         help="For promotion datasets, replace this many trailing days ending at --day.",
     )
+    parser.add_argument(
+        "--resume-from-latest",
+        action="store_true",
+        help="For each dataset, resume after its latest stored day and replay late-arriving report days.",
+    )
+    parser.add_argument(
+        "--mutable-refresh-days",
+        type=int,
+        default=4,
+        help="Trailing days to refresh for delayed BYBT, content, new-customer, and flash-sale reports.",
+    )
     parser.add_argument("--plan", action="store_true", help="Print the resolved plan without starting workers.")
     parser.add_argument("--list-datasets", action="store_true", help="List available dataset names and exit.")
     args = parser.parse_args(argv)
@@ -420,6 +564,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--browser-port must be between 1 and 65535")
     if args.promotion_refresh_days < 0:
         parser.error("--promotion-refresh-days must be zero or positive")
+    if args.mutable_refresh_days < 1:
+        parser.error("--mutable-refresh-days must be at least one")
     args.database_path = args.database_path.expanduser().resolve()
     specs = selected_specs(args.datasets)
     commands = [
@@ -434,6 +580,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             browser_port=args.browser_port,
             refresh_existing=args.refresh_existing,
             promotion_refresh_days=args.promotion_refresh_days,
+            resume_from_latest=args.resume_from_latest,
+            mutable_refresh_days=args.mutable_refresh_days,
         )
     ]
     plan = {
@@ -442,6 +590,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "database_path": str(args.database_path),
         "session_source": args.session_source,
         "datasets": list(args.datasets),
+        "resume_from_latest": args.resume_from_latest,
         "commands": commands,
     }
     if args.plan:
@@ -459,6 +608,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         fail_fast=args.fail_fast,
         timeout=args.timeout,
         promotion_refresh_days=args.promotion_refresh_days,
+        resume_from_latest=args.resume_from_latest,
+        mutable_refresh_days=args.mutable_refresh_days,
     )
     log_dir = args.database_path.parent / "daily_collection"
     log_path = log_dir / (

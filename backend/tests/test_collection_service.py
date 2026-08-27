@@ -581,7 +581,7 @@ def test_item_details_are_daily_facts_and_only_operational_products_are_snapshot
     assert COLLECTION_DATASET_BY_KEY["taobao_operational_snapshots"].collection_mode == "coverage_snapshot"
 
 
-def test_schedule_retries_attention_datasets_with_refresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_schedule_resumes_all_enabled_datasets_with_refresh_for_partial_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     database_path = tmp_path / "schedule.sqlite3"
     LocalDatabase(database_path).initialize_schema()
     service = CollectionService(database_path)
@@ -620,8 +620,9 @@ def test_schedule_retries_attention_datasets_with_refresh(tmp_path: Path, monkey
     )
 
     assert result is not None
-    assert captured["dataset_names"] == ["sycm_member_analysis"]
+    assert captured["dataset_names"] == ["sycm_member_analysis", "sycm_overviews"]
     assert captured["refresh_existing"] is True
+    assert captured["resume_from_latest"] is True
     assert service.get_schedule().last_triggered_day == "2026-08-20"
 
     # The persisted target-day marker prevents duplicate batches on the next
