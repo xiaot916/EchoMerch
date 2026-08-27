@@ -120,6 +120,10 @@ def get_runs(
     limit: int = Query(default=20, ge=1, le=100),
     _: Principal = Depends(require_permission("data.manage")),
 ) -> list[ReviewCollectionRun]:
+    # A worker can disappear during browser preflight or process restart. Run
+    # the same stale-lock reconciliation used by collection entry points so
+    # the UI does not keep showing a permanently running task.
+    active_feedback_run(Path(settings.local_database_path))
     service = get_review_service()
     conn = service.database.connect()
     try:
@@ -192,6 +196,7 @@ def get_ask_runs(
     limit: int = Query(default=20, ge=1, le=100),
     _: Principal = Depends(require_permission("data.manage")),
 ) -> list[ReviewCollectionRun]:
+    active_feedback_run(Path(settings.local_database_path))
     return get_review_service().ask_runs(limit)
 
 

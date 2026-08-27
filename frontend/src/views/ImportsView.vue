@@ -278,7 +278,7 @@ async function retryFailedBatch(batch: CollectionBatch): Promise<void> {
       sessionSource: "drissionpage",
       refreshExisting: true,
     })
-    await loadCrawlRuns()
+    await Promise.all([loadCrawlRuns(), loadReviewRuns(), loadAskRuns()])
   } catch (exc) {
     crawlError.value = exc instanceof Error ? exc.message : "失败项重试任务启动失败"
   } finally {
