@@ -79,7 +79,7 @@ MENU_DEFINITIONS: tuple[MenuDefinition, ...] = tuple(
         _domain("marketing-activities", "营销活动", "/marketing/activities", 8, "analytics.read", [
             ("route:marketing-activities", "活动复盘", "/marketing/activities", "analytics.read"),
             ("route:marketing-flash-sale", "淘宝秒杀", "/marketing/flash-sale", "analytics.read"),
-            ("route:marketing-new-customer", "新客礼金", "/marketing/new-customer", "analytics.read"),
+            ("route:marketing-new-customer", "新客折扣", "/marketing/new-customer", "analytics.read"),
             ("route:marketing-shopping-gold", "购物金", "/marketing/shopping-gold", "analytics.read"),
             ("route:marketing-bybt", "百亿补贴", "/marketing/bybt", "analytics.read"),
             ("route:marketing-utry", "U先试用", "/marketing/utry", "analytics.read"),

@@ -25,6 +25,7 @@ from app.core.local_database import (  # noqa: E402
 from app.integrations.tmall_session import add_session_source_arguments, resolve_runtime_session  # noqa: E402
 from app.modules.imports.crawl_run_store import CrawlRunStore  # noqa: E402
 from app.warehouse.store import WarehouseStore  # noqa: E402
+from scripts.fetch_taobao_flash_sale import FLASH_SALE_HOME_URL  # noqa: E402
 from scripts.fetch_taobao_flash_sale_items import fetch_taobao_flash_sale_items  # noqa: E402
 
 
@@ -53,7 +54,18 @@ def main() -> int:
     existing = _existing_days(database, args.store_id)
     pending = [day for day in days if args.refresh_existing or day not in existing]; args.output_dir.mkdir(parents=True, exist_ok=True)
     log_path = args.output_dir / f"backfill_store_daily_taobao_flash_sale_items_{_stamp()}.jsonl"
-    session = resolve_runtime_session(source=args.session_source, cookie_env=args.cookie_env, browser_port=args.browser_port) if pending else None
+    session = (
+        resolve_runtime_session(
+            source=args.session_source,
+            cookie_env=args.cookie_env,
+            browser_port=args.browser_port,
+            home_url=FLASH_SALE_HOME_URL,
+            platform_name="淘宝秒杀",
+            expected_hosts=("myseller.taobao.com",),
+        )
+        if pending
+        else None
+    )
     warehouse = WarehouseStore(args.database_path); runs = CrawlRunStore(args.database_path)
     runs.ensure_store_reference(store_id=args.store_id, store_name=args.store_name, platform_store_id=args.platform_store_id)
     run_id = runs.create_run(store_id=args.store_id, task_type="taobao_flash_sale_items", start_day=args.start, end_day=args.end, mode="refresh" if args.refresh_existing else "backfill", planned_days=len(days), log_file=log_path)

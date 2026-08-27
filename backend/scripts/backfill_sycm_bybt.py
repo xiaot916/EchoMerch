@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 import time
@@ -17,7 +18,7 @@ from app.core.config import settings  # noqa: E402
 from app.core.local_database import BUSINESS_DAY, STORE_ID, LocalDatabase, q  # noqa: E402
 from app.integrations.tmall_session import (  # noqa: E402
     add_session_source_arguments,
-    resolve_runtime_session,
+    resolve_bybt_runtime_context,
 )
 from app.modules.imports.crawl_run_store import CrawlRunStore  # noqa: E402
 from app.warehouse.store import WarehouseStore  # noqa: E402
@@ -36,7 +37,7 @@ def main() -> int:
     parser.add_argument("--store-id", type=int, default=1)
     parser.add_argument("--store-name", default=DEFAULT_STORE_NAME)
     parser.add_argument("--platform-store-id", default=DEFAULT_PLATFORM_STORE_ID)
-    parser.add_argument("--token", default="")
+    parser.add_argument("--token", default=os.getenv("SYCM_TOKEN", ""))
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--sleep-min", type=float, default=1.2)
     parser.add_argument("--sleep-max", type=float, default=2.8)
@@ -60,11 +61,13 @@ def main() -> int:
     pending = [day for day in days if args.refresh_existing or day not in existing]
     args.output_dir.mkdir(parents=True, exist_ok=True)
     log_path = args.output_dir / f"backfill_store_daily_bybt_{_stamp()}.jsonl"
-    session = (
-        resolve_runtime_session(
+    runtime = (
+        resolve_bybt_runtime_context(
             source=args.session_source,
             cookie_env=args.cookie_env,
+            token=args.token,
             browser_port=args.browser_port,
+            timeout=args.timeout,
         )
         if pending
         else None
@@ -100,8 +103,8 @@ def main() -> int:
                 fetched = fetch_sycm_bybt(
                     day=day,
                     output=output,
-                    cookie=session.cookie_header if session else "",
-                    token=args.token,
+                    cookie=runtime.session.cookie_header if runtime else "",
+                    token=runtime.token if runtime else "",
                     timeout=args.timeout,
                 )
                 if not fetched.ok:

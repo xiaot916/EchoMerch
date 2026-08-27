@@ -56,8 +56,8 @@ def flash_payload() -> dict[str, object]:
 
 
 class PromotionItemParserTests(unittest.TestCase):
-    def test_empty_bybt_overview_is_rejected_as_incomplete(self) -> None:
-        with self.assertRaisesRegex(SycmBybtPayloadError, "incomplete"):
+    def test_empty_bybt_overview_is_rejected_with_missing_metric_names(self) -> None:
+        with self.assertRaisesRegex(SycmBybtPayloadError, "百补访客.*百补支付件数"):
             parse_bybt_overview(
                 {"code": 0, "data": {"bybtOnlineItemCnt": {"value": "12"}}},
                 business_day=DAY,

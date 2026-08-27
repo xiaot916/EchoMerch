@@ -97,16 +97,19 @@ def parse_payload(
         endpoint_key=ENDPOINT_KEY,
         parser_version=PARSER_VERSION,
     )
-    required_metrics = (
-        parsed.visitors,
-        parsed.paid_buyers,
-        parsed.paid_amount,
-        parsed.paid_sub_order_count,
-        parsed.paid_items,
-    )
-    if any(value is None for value in required_metrics):
+    required_metrics = {
+        "百补访客": parsed.visitors,
+        "百补支付买家": parsed.paid_buyers,
+        "百补支付金额": parsed.paid_amount,
+        "百补支付订单": parsed.paid_sub_order_count,
+        "百补支付件数": parsed.paid_items,
+    }
+    missing = [label for label, value in required_metrics.items() if value is None]
+    if missing:
         raise SycmBybtPayloadError(
-            "The SYCM BYBT overview response is incomplete; required traffic and transaction metrics are missing."
+            "百亿补贴接口未返回核心指标（"
+            + "、".join(missing)
+            + "）；请确认百亿补贴页面权限后重试。"
         )
     return parsed
 

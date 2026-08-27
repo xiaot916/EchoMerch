@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 import time
@@ -22,7 +23,10 @@ from app.core.local_database import (  # noqa: E402
     LocalDatabase,
     q,
 )
-from app.integrations.tmall_session import add_session_source_arguments, resolve_runtime_session  # noqa: E402
+from app.integrations.tmall_session import (  # noqa: E402
+    add_session_source_arguments,
+    resolve_bybt_runtime_context,
+)
 from app.modules.imports.crawl_run_store import CrawlRunStore  # noqa: E402
 from app.warehouse.store import WarehouseStore  # noqa: E402
 from scripts.fetch_sycm_bybt_items import fetch_sycm_bybt_items  # noqa: E402
@@ -44,7 +48,17 @@ def main() -> int:
     pending = [day for day in days if args.refresh_existing or day not in existing]
     args.output_dir.mkdir(parents=True, exist_ok=True)
     log_path = args.output_dir / f"backfill_store_daily_bybt_items_{_stamp()}.jsonl"
-    session = resolve_runtime_session(source=args.session_source, cookie_env=args.cookie_env, browser_port=args.browser_port) if pending else None
+    runtime = (
+        resolve_bybt_runtime_context(
+            source=args.session_source,
+            cookie_env=args.cookie_env,
+            token=args.token,
+            browser_port=args.browser_port,
+            timeout=args.timeout,
+        )
+        if pending
+        else None
+    )
     warehouse = WarehouseStore(args.database_path)
     runs = CrawlRunStore(args.database_path)
     runs.ensure_store_reference(store_id=args.store_id, store_name=args.store_name, platform_store_id=args.platform_store_id)
@@ -67,7 +81,12 @@ def main() -> int:
                 print(f"[{index}/{len(days)}] {day} skipped existing")
                 continue
             try:
-                combined, rows, pages, stop_reason = _fetch_day(day, args, session.cookie_header if session else "")
+                combined, rows, pages, stop_reason = _fetch_day(
+                    day,
+                    args,
+                    runtime.session.cookie_header if runtime else "",
+                    runtime.token if runtime else "",
+                )
                 result = warehouse.ingest_sycm_bybt_items(source_path=combined, business_day=day, store_name=args.store_name, platform_store_id=args.platform_store_id)
                 failures = 0
                 status = "ingested" if rows else "no_data"
@@ -111,7 +130,7 @@ def _parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--store-id", type=int, default=1)
     parser.add_argument("--store-name", default=DEFAULT_STORE_NAME)
     parser.add_argument("--platform-store-id", default=DEFAULT_PLATFORM_STORE_ID)
-    parser.add_argument("--token", default="")
+    parser.add_argument("--token", default=os.getenv("SYCM_TOKEN", ""))
     parser.add_argument("--page-size", type=int, default=50)
     parser.add_argument("--max-pages", type=int, default=1000)
     parser.add_argument("--timeout", type=int, default=30)
@@ -134,12 +153,25 @@ def _validate(args: argparse.Namespace) -> None:
         raise ValueError("sleep values must be valid")
 
 
-def _fetch_day(day: date, args: argparse.Namespace, cookie: str) -> tuple[Path, int, int, str]:
+def _fetch_day(
+    day: date,
+    args: argparse.Namespace,
+    cookie: str,
+    token: str,
+) -> tuple[Path, int, int, str]:
     directory = args.output_dir / day.isoformat(); directory.mkdir(parents=True, exist_ok=True)
     payloads: list[dict[str, object]] = []; total_rows = 0; stop_reason = "max_pages"
     for page in range(1, args.max_pages + 1):
         output = directory / f"page_{page:04d}.json"
-        result = fetch_sycm_bybt_items(day=day, output=output, cookie=cookie, token=args.token, page=page, page_size=args.page_size, timeout=args.timeout)
+        result = fetch_sycm_bybt_items(
+            day=day,
+            output=output,
+            cookie=cookie,
+            token=token,
+            page=page,
+            page_size=args.page_size,
+            timeout=args.timeout,
+        )
         if not result.ok:
             raise RuntimeError(f"page {page} fetch failed: HTTP {result.status}, code {result.code}, message {result.message}")
         payload = json.loads(output.read_text(encoding="utf-8")); page_rows, count = _page_metadata(payload)

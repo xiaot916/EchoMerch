@@ -117,7 +117,7 @@ export const navigationDomains: NavigationDomain[] = [
     items: [
       { to: "/marketing/activities", label: "活动复盘", icon: Activity, permission: "analytics.read", menuCode: "route:marketing-activities" },
       { to: "/marketing/flash-sale", label: "淘宝秒杀", icon: Timer, permission: "analytics.read", menuCode: "route:marketing-flash-sale" },
-      { to: "/marketing/new-customer", label: "新客礼金", icon: UsersRound, permission: "analytics.read", menuCode: "route:marketing-new-customer" },
+      { to: "/marketing/new-customer", label: "新客折扣", icon: UsersRound, permission: "analytics.read", menuCode: "route:marketing-new-customer" },
       { to: "/marketing/shopping-gold", label: "购物金", icon: Store, permission: "analytics.read", menuCode: "route:marketing-shopping-gold" },
       { to: "/marketing/bybt", label: "百亿补贴", icon: BarChart3, permission: "analytics.read", menuCode: "route:marketing-bybt" },
       { to: "/marketing/utry", label: "U先试用", icon: PackageSearch, permission: "analytics.read", menuCode: "route:marketing-utry" },

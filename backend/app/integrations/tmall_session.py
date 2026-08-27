@@ -22,6 +22,16 @@ from urllib.request import urlopen
 
 DEFAULT_DEBUG_PORT = 9222
 DEFAULT_SYCM_HOME_URL = "https://sycm.taobao.com/portal/home.htm"
+DEFAULT_BYBT_HOME_URL = "https://sycm.taobao.com/xsite/frame/bybt?from=bybtzd"
+BYBT_OVERVIEW_URL = (
+    "https://sycm.taobao.com/mc/bybt/sellerData/businessOverview/statistics.json"
+)
+DEFAULT_NEW_CUSTOMER_DISCOUNT_HOME_URL = (
+    "https://sycm.taobao.com/xsite/promotion/promotion/sales?activeKey=promotionMethod"
+)
+NEW_CUSTOMER_DISCOUNT_OVERVIEW_URL = (
+    "https://sycm.taobao.com/s_content/brandnewdiscount/overview.json"
+)
 DEFAULT_DATABANK_HOME_URL = "https://databank.tmall.com/"
 DEFAULT_ALIMAMA_REPORT_HOME_URL = (
     "https://one.alimama.com/index.html#!/report/campaign?rptType=campaign"
@@ -129,6 +139,14 @@ class CpsRuntimeContext:
 
 
 @dataclass(frozen=True)
+class SycmRuntimeContext:
+    """Runtime-only values needed by SYCM endpoints with a request token."""
+
+    session: RuntimeSession
+    token: str = field(repr=False)
+
+
+@dataclass(frozen=True)
 class DatabankRuntimeContext:
     """Runtime-only values needed by the Tmall Brand Data Bank APIs."""
 
@@ -176,6 +194,8 @@ def resolve_runtime_session(
     cookie_env: str,
     browser_port: int = DEFAULT_DEBUG_PORT,
     home_url: str = DEFAULT_SYCM_HOME_URL,
+    platform_name: str = "生意参谋",
+    expected_hosts: tuple[str, ...] = ("sycm.taobao.com",),
 ) -> RuntimeSession:
     if source == "env":
         cookie_header = os.getenv(cookie_env, "").strip()
@@ -187,7 +207,12 @@ def resolve_runtime_session(
             cookie_count=_cookie_count(cookie_header),
         )
     if source == "drissionpage":
-        return DrissionPageSessionProvider(browser_port, home_url=home_url).read_session()
+        return DrissionPageSessionProvider(
+            browser_port,
+            home_url=home_url,
+            platform_name=platform_name,
+            expected_hosts=expected_hosts,
+        ).read_session()
     raise ValueError(f"Unsupported session source: {source}")
 
 
@@ -306,6 +331,95 @@ def resolve_cps_runtime_context(
             report_home_url=report_home_url,
             timeout=timeout,
         ).read_context(tb_token=tb_token)
+
+    raise ValueError(f"Unsupported session source: {source}")
+
+
+def resolve_bybt_runtime_context(
+    *,
+    source: str,
+    cookie_env: str,
+    token: str = "",
+    browser_port: int = DEFAULT_DEBUG_PORT,
+    home_url: str = DEFAULT_BYBT_HOME_URL,
+    timeout: float = 20,
+) -> SycmRuntimeContext:
+    """Resolve a live 百亿补贴 request token and browser cookies."""
+
+    return resolve_sycm_runtime_context(
+        source=source,
+        cookie_env=cookie_env,
+        token=token,
+        browser_port=browser_port,
+        home_url=home_url,
+        request_target=(
+            r"sycm\.taobao\.com/mc/bybt/sellerData/businessOverview/statistics\.json"
+        ),
+        platform_name="百亿补贴",
+        timeout=timeout,
+    )
+
+
+def resolve_new_customer_discount_runtime_context(
+    *,
+    source: str,
+    cookie_env: str,
+    token: str = "",
+    browser_port: int = DEFAULT_DEBUG_PORT,
+    home_url: str = DEFAULT_NEW_CUSTOMER_DISCOUNT_HOME_URL,
+    timeout: float = 20,
+) -> SycmRuntimeContext:
+    """Resolve a live 新客折扣 request token and browser cookies."""
+
+    return resolve_sycm_runtime_context(
+        source=source,
+        cookie_env=cookie_env,
+        token=token,
+        browser_port=browser_port,
+        home_url=home_url,
+        request_target=(
+            r"sycm\.taobao\.com/s_content/brandnewdiscount/overview\.json"
+        ),
+        platform_name="新客折扣",
+        timeout=timeout,
+    )
+
+
+def resolve_sycm_runtime_context(
+    *,
+    source: str,
+    cookie_env: str,
+    token: str = "",
+    browser_port: int = DEFAULT_DEBUG_PORT,
+    home_url: str,
+    request_target: str,
+    platform_name: str,
+    timeout: float = 20,
+) -> SycmRuntimeContext:
+    """Resolve cookies and a transient token from one authenticated SYCM page."""
+
+    if source == "env":
+        token = token or os.getenv("SYCM_TOKEN", "").strip()
+        session = resolve_runtime_session(
+            source=source,
+            cookie_env=cookie_env,
+            browser_port=browser_port,
+            home_url=home_url,
+        )
+        if not token:
+            raise RuntimeSessionUnavailable(
+                "--token/SYCM_TOKEN is required when --session-source=env."
+            )
+        return SycmRuntimeContext(session=session, token=token)
+
+    if source == "drissionpage":
+        return DrissionPageSycmTokenSessionProvider(
+            browser_port,
+            home_url=home_url,
+            request_target=request_target,
+            platform_name=platform_name,
+            timeout=timeout,
+        ).read_context(token=token)
 
     raise ValueError(f"Unsupported session source: {source}")
 
@@ -467,11 +581,20 @@ def _open_flow_tab(browser_port: int) -> tuple[DrissionPageBrowser, Any]:
 class DrissionPageSessionProvider:
     """Attach to an already-running, manually logged-in Chrome session."""
 
-    def __init__(self, browser_port: int, home_url: str = DEFAULT_SYCM_HOME_URL) -> None:
+    def __init__(
+        self,
+        browser_port: int,
+        home_url: str = DEFAULT_SYCM_HOME_URL,
+        *,
+        platform_name: str = "生意参谋",
+        expected_hosts: tuple[str, ...] = ("sycm.taobao.com",),
+    ) -> None:
         if not 1 <= browser_port <= 65535:
             raise ValueError("--browser-port must be between 1 and 65535.")
         self.browser_port = browser_port
         self.home_url = home_url
+        self.platform_name = platform_name
+        self.expected_hosts = expected_hosts
 
     def read_session(self) -> RuntimeSession:
         browser, tab = _open_flow_tab(self.browser_port)
@@ -479,8 +602,8 @@ class DrissionPageSessionProvider:
             tab.get(self.home_url)
             _wait_for_authenticated_tab(
                 tab,
-                platform_name="生意参谋",
-                expected_hosts=("sycm.taobao.com",),
+                platform_name=self.platform_name,
+                expected_hosts=self.expected_hosts,
             )
             # MTop signing cookies can be scoped to a sibling Taobao domain.
             cookies = tab.cookies(all_domains=True).as_dict()
@@ -497,6 +620,76 @@ class DrissionPageSessionProvider:
         else:
             browser.close_tab(tab)
             return session
+
+
+class DrissionPageSycmTokenSessionProvider:
+    """Capture a short-lived SYCM token emitted by one business page."""
+
+    def __init__(
+        self,
+        browser_port: int,
+        *,
+        home_url: str,
+        request_target: str,
+        platform_name: str,
+        timeout: float,
+    ) -> None:
+        if not 1 <= browser_port <= 65535:
+            raise ValueError("--browser-port must be between 1 and 65535.")
+        if timeout <= 0:
+            raise ValueError("SYCM request capture timeout must be positive.")
+        self.browser_port = browser_port
+        self.home_url = home_url
+        self.request_target = request_target
+        self.platform_name = platform_name
+        self.timeout = timeout
+
+    def read_context(self, *, token: str = "") -> SycmRuntimeContext:
+        browser, tab = _open_flow_tab(self.browser_port)
+        captured_token = token
+        should_capture = not captured_token
+        capture_started = False
+        if should_capture:
+            tab.listen.start(
+                targets=self.request_target,
+                is_regex=True,
+                method="GET",
+            )
+            capture_started = True
+        try:
+            tab.get(self.home_url)
+            _wait_for_authenticated_tab(
+                tab,
+                platform_name=self.platform_name,
+                timeout=max(self.timeout, DEFAULT_BROWSER_LOGIN_TIMEOUT),
+                expected_hosts=("sycm.taobao.com",),
+            )
+            if should_capture:
+                for packet in tab.listen.steps(timeout=self.timeout):
+                    captured_token = _extract_sycm_request_token(packet)
+                    if captured_token:
+                        break
+        finally:
+            if capture_started:
+                tab.listen.stop()
+
+        if not captured_token:
+            raise RuntimeSessionUnavailable(
+                f"{self.platform_name}页面已打开，但没有捕获到有效会话 token。"
+                "请确认账号拥有对应页面权限、报表可以正常显示后重试。"
+            )
+
+        cookie_header = cookie_header_from_mapping(tab.cookies(all_domains=True).as_dict())
+        context = SycmRuntimeContext(
+            session=RuntimeSession(
+                cookie_header=cookie_header,
+                source="drissionpage",
+                cookie_count=_cookie_count(cookie_header),
+            ),
+            token=captured_token,
+        )
+        browser.close_tab(tab)
+        return context
 
 
 class DrissionPageDatabankSessionProvider:
@@ -1273,6 +1466,18 @@ def _extract_cps_request_token(packet: Any) -> str:
     if not isinstance(post_data, Mapping):
         post_data = {}
     return _as_nonempty_text(params.get("_tb_token_") or post_data.get("_tb_token_"))
+
+
+def _extract_sycm_request_token(packet: Any) -> str:
+    """Read the transient token emitted by an authenticated SYCM request."""
+
+    request = getattr(packet, "request", None)
+    if request is None:
+        return ""
+    params = getattr(request, "params", {}) or {}
+    if not isinstance(params, Mapping):
+        return ""
+    return _as_nonempty_text(params.get("token"))
 
 
 def _cps_requires_primary_account(tab: Any) -> bool:

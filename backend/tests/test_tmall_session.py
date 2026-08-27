@@ -3,14 +3,19 @@ import pytest
 from app.integrations.tmall_session import (
     BrowserPlatformSession,
     DatabankRuntimeContext,
+    DrissionPageSessionProvider,
     RuntimeSessionUnavailable,
+    RuntimeSession,
+    SycmRuntimeContext,
     _extract_utry_dashboard_urls,
     _extract_brandsearch_request_context,
     _extract_cps_request_token,
+    _extract_sycm_request_token,
     _extract_alimama_request_context,
     cookie_header_from_mapping,
     open_browser_platform_session,
     resolve_alimama_runtime_context,
+    resolve_bybt_runtime_context,
     resolve_cps_runtime_context,
     resolve_runtime_session,
     resolve_databank_runtime_context,
@@ -143,6 +148,30 @@ def test_env_session_requires_a_nonempty_cookie(monkeypatch: pytest.MonkeyPatch)
         resolve_runtime_session(source="env", cookie_env="TEST_SYCM_COOKIE")
 
 
+def test_content_session_accepts_the_web_taobao_business_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    browser = _FakePlatformBrowser()
+    tab = _FakePlatformTab(
+        "https://web.taobao.com/s-guanghe-creator/asset-overview",
+        cookies={"t": "session", "_m_h5_tk": "runtime_123"},
+    )
+    monkeypatch.setattr(
+        "app.integrations.tmall_session._open_flow_tab",
+        lambda _port: (browser, tab),
+    )
+
+    session = DrissionPageSessionProvider(
+        9222,
+        home_url="https://web.taobao.com/s-guanghe-creator/asset-overview",
+        platform_name="内容效果",
+        expected_hosts=("web.taobao.com",),
+    ).read_session()
+
+    assert session.cookie_count == 2
+    assert browser.closed == [tab]
+
+
 class _Request:
     def __init__(self, params: object, post_data: object) -> None:
         self.params = params
@@ -223,6 +252,85 @@ def test_cps_context_reads_token_from_the_observed_get_request() -> None:
     )
 
     assert token == "cps-runtime-token"
+
+
+def test_sycm_context_reads_token_from_the_observed_get_request() -> None:
+    token = _extract_sycm_request_token(
+        _Packet({"token": "sycm-runtime-token", "dateType": "day"}, {})
+    )
+
+    assert token == "sycm-runtime-token"
+
+
+def test_env_bybt_context_requires_a_transient_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TEST_BYBT_COOKIE", "t=session")
+    monkeypatch.delenv("SYCM_TOKEN", raising=False)
+
+    with pytest.raises(RuntimeSessionUnavailable, match="SYCM_TOKEN"):
+        resolve_bybt_runtime_context(source="env", cookie_env="TEST_BYBT_COOKIE")
+
+
+def test_env_bybt_context_reads_an_explicit_transient_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_BYBT_COOKIE", "t=session")
+
+    context = resolve_bybt_runtime_context(
+        source="env",
+        cookie_env="TEST_BYBT_COOKIE",
+        token="bybt-from-argument",
+    )
+
+    assert context.token == "bybt-from-argument"
+
+
+def test_bybt_drissionpage_context_uses_the_business_page_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeProvider:
+        def __init__(
+            self,
+            browser_port: int,
+            *,
+            home_url: str,
+            request_target: str,
+            platform_name: str,
+            timeout: float,
+        ) -> None:
+            captured.update(
+                browser_port=browser_port,
+                home_url=home_url,
+                request_target=request_target,
+                platform_name=platform_name,
+                timeout=timeout,
+            )
+
+        def read_context(self, *, token: str = "") -> SycmRuntimeContext:
+            captured["token"] = token
+            return SycmRuntimeContext(
+                session=RuntimeSession(cookie_header="t=session"),
+                token=token or "bybt-runtime-token",
+            )
+
+    monkeypatch.setattr(
+        "app.integrations.tmall_session.DrissionPageSycmTokenSessionProvider",
+        FakeProvider,
+    )
+
+    context = resolve_bybt_runtime_context(
+        source="drissionpage",
+        cookie_env="TEST_BYBT_COOKIE",
+        token="bybt-explicit",
+        browser_port=9333,
+        timeout=17,
+    )
+
+    assert context.token == "bybt-explicit"
+    assert captured["browser_port"] == 9333
+    assert captured["platform_name"] == "百亿补贴"
+    assert captured["token"] == "bybt-explicit"
 
 
 def test_env_cps_context_requires_a_transient_token(monkeypatch: pytest.MonkeyPatch) -> None:

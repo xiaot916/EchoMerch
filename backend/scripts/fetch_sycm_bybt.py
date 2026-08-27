@@ -17,7 +17,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "backend"))
 
 from app.integrations.tmall_session import (  # noqa: E402
     add_session_source_arguments,
-    resolve_runtime_session,
+    resolve_bybt_runtime_context,
 )
 
 
@@ -122,16 +122,18 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=30)
     add_session_source_arguments(parser)
     args = parser.parse_args()
-    session = resolve_runtime_session(
+    runtime = resolve_bybt_runtime_context(
         source=args.session_source,
         cookie_env=args.cookie_env,
+        token=args.token,
         browser_port=args.browser_port,
+        timeout=args.timeout,
     )
     result = fetch_sycm_bybt(
         day=args.day,
         output=args.output,
-        cookie=session.cookie_header,
-        token=args.token,
+        cookie=runtime.session.cookie_header,
+        token=runtime.token,
         timeout=args.timeout,
     )
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2))

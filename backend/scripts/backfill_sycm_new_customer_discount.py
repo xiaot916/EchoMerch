@@ -18,7 +18,7 @@ from app.core.config import settings  # noqa: E402
 from app.core.local_database import BUSINESS_DAY, STORE_ID, LocalDatabase, q  # noqa: E402
 from app.integrations.tmall_session import (  # noqa: E402
     add_session_source_arguments,
-    resolve_runtime_session,
+    resolve_new_customer_discount_runtime_context,
 )
 from app.modules.imports.crawl_run_store import CrawlRunStore  # noqa: E402
 from app.warehouse.store import WarehouseStore  # noqa: E402
@@ -93,11 +93,13 @@ def main() -> int:
     planned_days = [
         day for day in days if args.refresh_existing or day not in existing_days
     ]
-    session = (
-        resolve_runtime_session(
+    runtime = (
+        resolve_new_customer_discount_runtime_context(
             source=args.session_source,
             cookie_env=args.cookie_env,
+            token=args.token,
             browser_port=args.browser_port,
+            timeout=args.timeout,
         )
         if planned_days
         else None
@@ -145,8 +147,8 @@ def main() -> int:
                 fetched = fetch_sycm_new_customer_discount(
                     day=day,
                     output=response_path,
-                    cookie=session.cookie_header if session else "",
-                    token=args.token,
+                    cookie=runtime.session.cookie_header if runtime else "",
+                    token=runtime.token if runtime else "",
                     timeout=args.timeout,
                 )
                 if not fetched.ok:

@@ -2092,7 +2092,7 @@ class AIAnalysisService:
                     return "customer"
                 if "review" in datasets or "评价" in datasets or "问大家" in datasets:
                     return "review"
-                if "activity" in datasets or "flash" in datasets or "customer discount" in datasets or "活动" in datasets or "秒杀" in datasets or "新客礼金" in datasets:
+                if "activity" in datasets or "flash" in datasets or "customer discount" in datasets or "活动" in datasets or "秒杀" in datasets or "新客折扣" in datasets or "新客礼金" in datasets:
                     return "campaign"
                 if "content" in datasets or "内容" in datasets:
                     return "campaign"

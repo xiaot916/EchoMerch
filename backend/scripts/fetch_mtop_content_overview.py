@@ -149,6 +149,8 @@ def main() -> int:
         cookie_env=args.cookie_env,
         browser_port=args.browser_port,
         home_url=CONTENT_HOME_URL,
+        platform_name="内容效果",
+        expected_hosts=("web.taobao.com",),
     )
     result = fetch_mtop_content_overview(
         day=args.day,

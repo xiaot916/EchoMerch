@@ -30,6 +30,7 @@ from app.integrations.tmall_session import (  # noqa: E402
 from app.modules.imports.crawl_run_store import CrawlRunStore  # noqa: E402
 from app.warehouse.store import WarehouseStore  # noqa: E402
 from scripts.fetch_taobao_flash_sale import (  # noqa: E402
+    FLASH_SALE_HOME_URL,
     fetch_taobao_flash_sale,
 )
 
@@ -85,6 +86,9 @@ def main() -> int:
             source=args.session_source,
             cookie_env=args.cookie_env,
             browser_port=args.browser_port,
+            home_url=FLASH_SALE_HOME_URL,
+            platform_name="淘宝秒杀",
+            expected_hosts=("myseller.taobao.com",),
         )
         if planned_days
         else None

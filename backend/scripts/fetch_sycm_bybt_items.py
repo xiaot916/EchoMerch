@@ -15,7 +15,10 @@ from urllib.request import Request, urlopen
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "backend"))
 
-from app.integrations.tmall_session import add_session_source_arguments, resolve_runtime_session  # noqa: E402
+from app.integrations.tmall_session import (  # noqa: E402
+    add_session_source_arguments,
+    resolve_bybt_runtime_context,
+)
 
 
 INDEX_CODES = ",".join((
@@ -96,8 +99,22 @@ def main() -> int:
     args = parser.parse_args()
     if args.page < 1 or not 1 <= args.page_size <= 100:
         raise ValueError("page must be positive and page-size must be 1..100")
-    session = resolve_runtime_session(source=args.session_source, cookie_env=args.cookie_env, browser_port=args.browser_port)
-    result = fetch_sycm_bybt_items(day=args.day, output=args.output, cookie=session.cookie_header, token=args.token, page=args.page, page_size=args.page_size, timeout=args.timeout)
+    runtime = resolve_bybt_runtime_context(
+        source=args.session_source,
+        cookie_env=args.cookie_env,
+        token=args.token,
+        browser_port=args.browser_port,
+        timeout=args.timeout,
+    )
+    result = fetch_sycm_bybt_items(
+        day=args.day,
+        output=args.output,
+        cookie=runtime.session.cookie_header,
+        token=runtime.token,
+        page=args.page,
+        page_size=args.page_size,
+        timeout=args.timeout,
+    )
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
     return 0 if result.ok else 1
 

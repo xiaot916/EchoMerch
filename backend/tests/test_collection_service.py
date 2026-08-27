@@ -188,6 +188,48 @@ def test_new_customer_discount_placeholder_is_partial_not_complete(tmp_path: Pat
     assert coverage.error_message == "接口已返回店铺级数据，但活动级新客指标为空，尚未形成完整日报。"
 
 
+def test_complete_dataset_does_not_surface_an_older_task_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = CollectionService(tmp_path / "collection.sqlite3")
+    dataset = COLLECTION_DATASET_BY_KEY["databank_daily"]
+    day = date(2026, 8, 24)
+    monkeypatch.setattr(
+        service,
+        "_table_coverage_for_dataset",
+        lambda _conn, _dataset, table, _day: DatasetTableCoverage(
+            table=table, present=True, row_count=1, latest_date=day.isoformat()
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_latest_task_attempts",
+        lambda *_args: [{
+            "task_type": "databank_daily",
+            "day_status": "ingest_failed",
+            "run_status": "completed_with_errors",
+            "started_at": "2026-08-24T09:22:00+08:00",
+            "error_message": "missing core snapshot data",
+        }],
+    )
+
+    coverage = service._dataset_coverage(object(), dataset, day)
+
+    assert coverage.status == "complete"
+    assert coverage.error_message is None
+
+
+def test_legacy_bybt_error_is_explained_in_operator_language(
+    tmp_path: Path,
+) -> None:
+    service = CollectionService(tmp_path / "collection.sqlite3")
+
+    assert service._coverage_error_message(
+        "The SYCM BYBT overview response is incomplete; required traffic and transaction metrics are missing."
+    ) == "百亿补贴接口未返回流量和成交指标（访客、支付买家、支付金额、支付订单、支付件数）；请确认百亿补贴页面权限后重试。"
+
+
 def test_utry_explicit_empty_subreport_counts_as_covered(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

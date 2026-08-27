@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -20,6 +19,9 @@ from app.integrations.tmall_session import (  # noqa: E402
     add_session_source_arguments,
     resolve_runtime_session,
 )
+
+
+FLASH_SALE_HOME_URL = "https://myseller.taobao.com/home.htm/ltao-home/"
 
 
 @dataclass(frozen=True)
@@ -47,12 +49,10 @@ def fetch_taobao_flash_sale(
         * 1000
     )
     params = {
-        "tb_token": _cookie_value(cookie, "_tb_token_", "tb_token", "tb-token"),
         "startTime": str(timestamp),
         "endTime": str(timestamp),
-        "sm_request": "true",
+        "__sm_request__": "true",
     }
-    params = {key: value for key, value in params.items() if value}
     request = Request(
         "https://sale.taobao.com/extend/api/tbhjActivityDataQuery.json?"
         f"{urlencode(params)}",
@@ -106,6 +106,9 @@ def main() -> int:
         source=args.session_source,
         cookie_env=args.cookie_env,
         browser_port=args.browser_port,
+        home_url=FLASH_SALE_HOME_URL,
+        platform_name="淘宝秒杀",
+        expected_hosts=("myseller.taobao.com",),
     )
     result = fetch_taobao_flash_sale(
         day=args.day,
@@ -114,17 +117,6 @@ def main() -> int:
     )
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
     return 0 if result.ok else 1
-
-
-def _cookie_value(cookie_header: str, *names: str) -> str:
-    wanted = {name.lower() for name in names}
-    for part in cookie_header.split(";"):
-        if "=" not in part:
-            continue
-        name, value = part.strip().split("=", 1)
-        if name.lower() in wanted:
-            return value.strip()
-    return ""
 
 
 def _response_code_and_message(payload: object) -> tuple[int | None, str | None]:

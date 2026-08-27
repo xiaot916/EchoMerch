@@ -1046,7 +1046,7 @@ class LocalWarehouseAnalyticsRepository:
             ("推广关键词", "store_daily_promotion_bidwords"),
             ("推广商品", "store_daily_promotion_items"),
             ("推广内容", "store_daily_promotion_contents"),
-            ("新客礼金", "store_daily_new_customer_discount_overviews"),
+            ("新客折扣", "store_daily_new_customer_discount_overviews"),
             ("购物金", "store_daily_shopping_gold_overviews"),
             ("淘金币", "store_daily_taojinbi_overviews"),
             ("百亿补贴", "store_daily_bybt_overviews"),

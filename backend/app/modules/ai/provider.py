@@ -19,9 +19,8 @@ class AIProviderError(RuntimeError):
 
 @lru_cache(maxsize=1)
 def _ecommerce_methodology() -> str:
-    # Keep the provider prompt aligned with the installed analytics skill.
-    # The old singular directory name silently returned an empty methodology.
-    skill_path = Path(__file__).resolve().parents[3] / "skills" / "ecommerce-analytics-methodology" / "SKILL.md"
+    # Use the versioned project skill so prompts do not depend on a local Codex install.
+    skill_path = Path(__file__).resolve().parents[3] / "skills" / "ecommerce-analysis-methodology" / "SKILL.md"
     try:
         return skill_path.read_text(encoding="utf-8").strip()
     except OSError:

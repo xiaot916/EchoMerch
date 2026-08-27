@@ -124,6 +124,8 @@ def main() -> int:
                 cookie_env=args.cookie_env,
                 browser_port=args.browser_port,
                 home_url=CONTENT_HOME_URL,
+                platform_name="内容效果",
+                expected_hosts=("web.taobao.com",),
             )
         except Exception as exc:
             # Browser/page preflight used to happen before the crawl ledger was

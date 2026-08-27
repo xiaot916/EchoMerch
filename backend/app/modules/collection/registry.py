@@ -50,9 +50,9 @@ COLLECTION_DATASETS: tuple[CollectionDataset, ...] = (
         ), ("sycm_member_analysis",), "会员资产、复购与入会渠道。",
     ),
     CollectionDataset(
-        "sycm_new_customer_discount", "新客礼金", "营销",
+        "sycm_new_customer_discount", "新客折扣", "营销",
         ("store_daily_new_customer_discount_overviews",),
-        ("sycm_new_customer_discount",), "新客礼金触达与成交表现。",
+        ("sycm_new_customer_discount",), "新客折扣触达与成交表现。",
     ),
     CollectionDataset(
         "sycm_shopping_gold", "购物金", "营销", ("store_daily_shopping_gold_overviews",),

@@ -138,7 +138,7 @@ def test_super_admin_manages_user_lifecycle_over_http(tmp_path: Path) -> None:
             assert any(item["code"] == "route:overview" for item in directory.json()["menus"])
             # 市场洞察和 AI 配置均作为独立入口纳入权限目录。
             assert any(item["code"] == "route:system-ai" for item in directory.json()["menus"])
-            assert len(directory.json()["menus"]) == 46
+            assert len(directory.json()["menus"]) == 47
 
             role_access = client.put(
                 "/api/v1/access/roles/operator/access",

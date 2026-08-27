@@ -413,6 +413,14 @@ class CollectionService:
             status = "no_data"
         else:
             status = "missing"
+
+        # A later successful ingestion is authoritative for the coverage
+        # view. Keep prior task failures in the run history, but do not attach
+        # them to a dataset that is now complete or explicitly has no data.
+        if status in {"complete", "no_data"}:
+            error = None
+        else:
+            error = self._coverage_error_message(error)
         return DatasetCoverage(
             key=dataset.key,
             label=dataset.label,
@@ -430,6 +438,19 @@ class CollectionService:
             error_message=error,
             tables=table_states,
         )
+
+    @staticmethod
+    def _coverage_error_message(error: str | None) -> str | None:
+        """Normalize known worker errors into concise operator guidance."""
+        if error == (
+            "The SYCM BYBT overview response is incomplete; required traffic "
+            "and transaction metrics are missing."
+        ):
+            return (
+                "百亿补贴接口未返回流量和成交指标（访客、支付买家、支付金额、"
+                "支付订单、支付件数）；请确认百亿补贴页面权限后重试。"
+            )
+        return error
 
     def _latest_batch_failure(
         self,

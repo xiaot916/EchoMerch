@@ -17,7 +17,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "backend"))
 
 from app.integrations.tmall_session import (  # noqa: E402
     add_session_source_arguments,
-    resolve_runtime_session,
+    resolve_new_customer_discount_runtime_context,
 )
 
 
@@ -112,16 +112,17 @@ def main() -> int:
     parser.add_argument("--token", default=os.getenv("SYCM_TOKEN", ""))
     add_session_source_arguments(parser)
     args = parser.parse_args()
-    session = resolve_runtime_session(
+    runtime = resolve_new_customer_discount_runtime_context(
         source=args.session_source,
         cookie_env=args.cookie_env,
+        token=args.token,
         browser_port=args.browser_port,
     )
     result = fetch_sycm_new_customer_discount(
         day=args.day,
         output=args.output,
-        cookie=session.cookie_header,
-        token=args.token,
+        cookie=runtime.session.cookie_header,
+        token=runtime.token,
     )
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
     return 0 if result.ok else 1
