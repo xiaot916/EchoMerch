@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -718,6 +719,54 @@ def test_start_batch_rejects_second_running_batch(tmp_path: Path) -> None:
         )
 
 
+def test_start_batch_allows_only_one_concurrent_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "batch-concurrent.sqlite3"
+    service = CollectionService(database_path)
+    monkeypatch.setattr("app.modules.collection.service.active_feedback_run", lambda _path: None)
+    monkeypatch.setattr(service, "_process_exists", lambda _process_id: True)
+    monkeypatch.setattr(service, "_monitor_process", lambda *_args: None)
+
+    class FakeProcess:
+        _next_pid = 6000
+
+        def __init__(self) -> None:
+            self.pid = FakeProcess._next_pid
+            FakeProcess._next_pid += 1
+
+    monkeypatch.setattr(
+        "app.modules.collection.service.subprocess.Popen",
+        lambda *_args, **_kwargs: FakeProcess(),
+    )
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+
+    def invoke() -> None:
+        barrier.wait()
+        try:
+            service.start_batch(
+                business_day=date(2026, 8, 20),
+                dataset_names=["sycm_overviews"],
+                session_source="drissionpage",
+                refresh_existing=False,
+                trigger="manual",
+            )
+        except CollectionBatchConflict:
+            outcomes.append("conflict")
+        else:
+            outcomes.append("started")
+
+    workers = [threading.Thread(target=invoke) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=10)
+
+    assert sorted(outcomes) == ["conflict", "started"]
+
+
 def test_list_batches_recovers_stale_running_batch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -807,6 +856,48 @@ def test_start_batch_launches_worker_without_waiting_for_collection(
     assert "--refresh-existing" in launched["command"]
     assert batch.process_id == 4321
     assert batch.status == "completed_with_errors"
+
+
+def test_start_batch_keeps_manual_dataset_scope_without_market_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = CollectionService(tmp_path / "batch-scope.sqlite3")
+    launched: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 4321
+
+        @staticmethod
+        def wait() -> int:
+            return 0
+
+    class ImmediateThread:
+        def __init__(self, *, target, args, **_kwargs) -> None:
+            self.target = target
+            self.args = args
+
+        def start(self) -> None:
+            self.target(*self.args)
+
+    def fake_popen(command, **kwargs):
+        launched["command"] = command
+        launched["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr("app.modules.collection.service.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("app.modules.collection.service.threading.Thread", ImmediateThread)
+    service.start_batch(
+        business_day=date(2026, 8, 20),
+        dataset_names=["sycm_bybt"],
+        session_source="drissionpage",
+        refresh_existing=False,
+        trigger="manual",
+    )
+
+    command = launched["command"]
+    assert "--datasets" in command
+    assert command[command.index("--datasets") + 1] == "sycm_bybt"
 
 
 def test_collection_overview_and_schedule_routes(

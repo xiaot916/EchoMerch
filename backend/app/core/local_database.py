@@ -1989,6 +1989,7 @@ DAILY_OVERVIEW_LEGACY_ALIASES: dict[str, tuple[str, ...]] = {
 class LocalDatabase:
     """Shared local SQLite schema with readable Chinese business columns."""
 
+    SCHEMA_VERSION: ClassVar[int] = 1
     _schema_lock: ClassVar[threading.RLock] = threading.RLock()
     _initialized_paths: ClassVar[set[Path]] = set()
 
@@ -2043,7 +2044,22 @@ class LocalDatabase:
             try:
                 conn.execute("pragma foreign_keys = off")
                 conn.execute("pragma journal_mode = wal")
-                self._ensure_schema(conn)
+                conn.execute(
+                    """
+                    create table if not exists schema_version (
+                        version integer primary key,
+                        applied_at text not null
+                    )
+                    """
+                )
+                current = conn.execute("select max(version) from schema_version").fetchone()[0]
+                if force or current != self.SCHEMA_VERSION:
+                    self._ensure_schema(conn)
+                    conn.execute("delete from schema_version")
+                    conn.execute(
+                        "insert into schema_version(version, applied_at) values (?, ?)",
+                        (self.SCHEMA_VERSION, datetime.now().astimezone().isoformat(timespec="seconds")),
+                    )
                 conn.execute("pragma foreign_keys = on")
                 conn.commit()
                 self._initialized_paths.add(self.database_path)

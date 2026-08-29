@@ -298,7 +298,7 @@ function syncCrawlPolling(): void {
   if (taskView.value !== "daily" || document.visibilityState === "hidden" || (activeCrawl.value?.status !== "running" && latestBatch.value?.status !== "running")) return
   crawlPollTimer = window.setInterval(() => {
     if (document.visibilityState !== "hidden" && !crawlLoading.value) void loadCrawlRuns()
-  }, 5000)
+  }, 2500)
 }
 
 function handleVisibilityChange(): void {

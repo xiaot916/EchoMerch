@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import logging
 import re
 import threading
 import time
@@ -25,6 +26,9 @@ from app.core.config import Settings, settings
 from app.core.local_database import STORE_ID, q
 from app.integrations.jackyun_credentials import CredentialVaultError, load_vault, save_vault
 from app.modules.inventory.service import InventoryService
+
+
+logger = logging.getLogger(__name__)
 
 
 class JackyunIntegrationError(RuntimeError):
@@ -761,7 +765,7 @@ class JackyunInventorySyncService:
     def store_ids(self) -> list[int]:
         if self.client.config.jackyun_store_ids:
             return list(self.client.config.jackyun_store_ids)
-        with self.inventory.database.connect(initialize=True) as conn:
+        with self.inventory.database.connect() as conn:
             rows = conn.execute(f"select {q(STORE_ID)} as store_id from stores order by {q(STORE_ID)}").fetchall()
             return [int(row["store_id"]) for row in rows]
 
@@ -867,7 +871,7 @@ class JackyunInventorySyncService:
         return results
 
     def _due(self, store_id: int) -> bool:
-        with self.inventory.database.connect(initialize=True) as conn:
+        with self.inventory.database.connect() as conn:
             row = conn.execute("select latest_snapshot_at, last_attempt_at from jackyun_inventory_sync_status where store_id = ?", (store_id,)).fetchone()
         if not row:
             return True
@@ -888,7 +892,7 @@ class JackyunInventorySyncService:
         return age >= self.client.config.jackyun_inventory_refresh_minutes
 
     def _master_due(self, store_id: int, business_day: date) -> bool:
-        with self.inventory.database.connect(initialize=True) as conn:
+        with self.inventory.database.connect() as conn:
             row = conn.execute(
                 "select goods_status, package_status from jackyun_inventory_master_sync_status where store_id = ? and business_day = ?",
                 (store_id, business_day.isoformat()),
@@ -917,13 +921,20 @@ class JackyunInventoryScheduler:
         self._stop_event.set()
 
     def _run(self) -> None:
-        service = JackyunInventorySyncService()
+        poll_interval = 60.0
+        backoff = poll_interval
+        service: JackyunInventorySyncService | None = None
         while not self._stop_event.is_set():
             try:
+                if service is None:
+                    service = JackyunInventorySyncService()
                 service.run_due()
+                backoff = poll_interval
             except Exception:
-                pass
-            self._stop_event.wait(60)
+                logger.exception("吉客云库存调度轮询失败")
+                service = None
+                backoff = min(backoff * 2, 15 * 60)
+            self._stop_event.wait(min(15 * 60.0, backoff))
 
 
 jackyun_inventory_scheduler = JackyunInventoryScheduler()

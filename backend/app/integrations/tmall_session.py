@@ -60,6 +60,7 @@ UTRY_DASHBOARD_LIST_API = (
     "mtop.tmall.tmesh.apps.utry.sampleplatform.getDataDashboardList"
 )
 UTRY_DASHBOARD_RESULT_GLOBAL = "__echoMerchUtryDashboardResult"
+ALIMAMA_RUNTIME_GLOBAL = "__echoMerchAlimamaRuntime"
 DEFAULT_BROWSER_LOGIN_TIMEOUT = 180
 
 
@@ -369,7 +370,21 @@ def resolve_new_customer_discount_runtime_context(
     home_url: str = DEFAULT_NEW_CUSTOMER_DISCOUNT_HOME_URL,
     timeout: float = 20,
 ) -> SycmRuntimeContext:
-    """Resolve a live 新客折扣 request token and browser cookies."""
+    """Resolve 新客折扣 with the logged-in SYCM page session.
+
+    The endpoint accepts the browser Cookie session directly. Token capture
+    used to make this otherwise simple report depend on a second page load and
+    could fail when the SPA served the data from an already-warm page.
+    """
+
+    if source == "drissionpage":
+        session = DrissionPageSessionProvider(
+            browser_port,
+            home_url=home_url,
+            platform_name="新客折扣",
+            expected_hosts=("sycm.taobao.com",),
+        ).read_session()
+        return SycmRuntimeContext(session=session, token=token.strip())
 
     return resolve_sycm_runtime_context(
         source=source,
@@ -496,12 +511,11 @@ def cookie_header_from_mapping(cookies: Mapping[str, object]) -> str:
 
 
 class DrissionPageBrowser:
-    """Connect to the configured browser and open isolated collection tabs.
+    """Connect to the configured browser without owning the browser process.
 
-    The browser itself is user-owned and is never closed by a worker. Each
-    collector gets a fresh tab so it can navigate to its own business page,
-    wait for a manual login if needed, and capture that page's live requests
-    without hijacking the user's current tab.
+    Providers reuse an already-open matching page whenever its session is
+    sufficient; a worker-owned tab is created only for a first-time capture or
+    a platform that still needs a live request listener.
     """
 
     def __init__(self, browser_port: int) -> None:
@@ -578,6 +592,224 @@ def _open_flow_tab(browser_port: int) -> tuple[DrissionPageBrowser, Any]:
     return browser, browser.new_tab()
 
 
+def _browser_tabs(
+    browser: DrissionPageBrowser,
+    expected_hosts: tuple[str, ...] = (),
+) -> list[Any]:
+    """List live page targets through the bounded Chrome JSON endpoint."""
+
+    native_browser = getattr(browser, "browser", None)
+    if native_browser is None:
+        return []
+    address = getattr(native_browser, "address", "")
+    if not address:
+        return []
+    try:
+        with urlopen(f"http://{address}/json", timeout=2.0) as response:
+            records = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return []
+    tabs: list[Any] = []
+    for record in records if isinstance(records, list) else []:
+        if not isinstance(record, Mapping) or record.get("type") != "page":
+            continue
+        record_url = _as_nonempty_text(record.get("url"))
+        if expected_hosts and not _url_matches_hosts(record_url, expected_hosts):
+            continue
+        tab_id = _as_nonempty_text(record.get("id"))
+        if not tab_id:
+            continue
+        try:
+            tabs.append(native_browser.get_tab(tab_id))
+        except Exception:
+            continue
+    return tabs
+
+
+def _open_reusable_flow_tab(
+    browser_port: int,
+    expected_hosts: tuple[str, ...],
+) -> tuple[DrissionPageBrowser, Any, bool]:
+    """Attach to an existing platform page before creating a blank tab."""
+
+    browser = DrissionPageBrowser(browser_port)
+    existing = _find_existing_tab(browser, None, expected_hosts)
+    if existing is not None:
+        return browser, existing, False
+    return browser, browser.new_tab(), True
+
+
+def _find_existing_platform_session(
+    browser: Any,
+    current_tab: Any,
+    spec: _BrowserPlatformSpec,
+) -> BrowserPlatformSession | None:
+    """Reuse an already-open business tab during lightweight preflight.
+
+    The collection entrypoint only needs to prove that the browser session is
+    usable. Reusing a matching tab avoids opening another tab and, more
+    importantly, avoids navigating through a slow or temporarily unavailable
+    homepage when the user is already logged in.
+    """
+
+    tabs = _browser_tabs(browser, spec.hosts)
+
+    probes = [
+        (tab, _platform_tab_session(tab, spec))
+        for tab in tabs
+        if tab is not current_tab
+    ]
+    return next(
+        (item for _tab, item in probes if item.authenticated),
+        next((item for _tab, item in probes if item.page_detected), None),
+    )
+
+
+def _navigate_tab(tab: Any, url: str, *, timeout: float) -> None:
+    """Navigate with DrissionPage's bounded page-load timeout.
+
+    A small compatibility fallback keeps lightweight fake tabs used by tests
+    working when they do not accept DrissionPage's keyword arguments.
+    """
+
+    navigation_timeout = max(1.0, float(timeout))
+    # Page.navigate returns as soon as Chrome schedules navigation, unlike
+    # tab.get(), which can block indefinitely while a SPA waits on a stalled
+    # subresource. The bounded authenticated-page poll handles readiness.
+    if hasattr(tab, "run_cdp"):
+        try:
+            tab.run_cdp("Page.navigate", url=url)
+            return
+        except Exception as exc:
+            raise RuntimeSessionUnavailable(
+                "采集页面导航请求失败，请检查浏览器网络后重试。"
+            ) from exc
+    try:
+        tab.get(url, timeout=navigation_timeout)
+    except TypeError as exc:
+        if "timeout" not in str(exc).lower():
+            raise
+        tab.get(url)
+
+
+def _runtime_session_from_tab(tab: Any) -> RuntimeSession:
+    """Build a process-local session from one already authenticated tab."""
+
+    cookies = tab.cookies(all_domains=True).as_dict()
+    cookie_header = cookie_header_from_mapping(cookies)
+    return RuntimeSession(
+        cookie_header=cookie_header,
+        source="drissionpage",
+        cookie_count=_cookie_count(cookie_header),
+    )
+
+
+def _runtime_cookie_value_from_tab(tab: Any, name: str) -> str:
+    """Read a cookie from the current host before falling back to all domains."""
+
+    try:
+        current = tab.cookies().as_dict()
+        value = _as_nonempty_text(current.get(name))
+        if value:
+            return value
+    except Exception:
+        pass
+    try:
+        return _cookie_value(
+            cookie_header_from_mapping(tab.cookies(all_domains=True).as_dict()),
+            name,
+        )
+    except RuntimeSessionUnavailable:
+        return ""
+
+
+def _find_existing_runtime_session(
+    browser: Any,
+    current_tab: Any,
+    expected_hosts: tuple[str, ...],
+) -> RuntimeSession | None:
+    """Reuse a matching authenticated tab without another page navigation."""
+
+    tabs = _browser_tabs(browser, expected_hosts)
+    for candidate in tabs:
+        if candidate is current_tab:
+            continue
+        url = str(getattr(candidate, "url", "") or "")
+        if _is_login_url(url) or not _url_matches_hosts(url, expected_hosts):
+            continue
+        try:
+            return _runtime_session_from_tab(candidate)
+        except RuntimeSessionUnavailable:
+            continue
+    return None
+
+
+def _find_existing_tab(
+    browser: Any,
+    current_tab: Any,
+    expected_hosts: tuple[str, ...],
+) -> Any | None:
+    """Return the first already-open, non-login tab for a platform."""
+
+    tabs = _browser_tabs(browser, expected_hosts)
+    for candidate in tabs:
+        if candidate is current_tab:
+            continue
+        url = str(getattr(candidate, "url", "") or "")
+        if _is_login_url(url) or not _url_matches_hosts(url, expected_hosts):
+            continue
+        return candidate
+    return None
+
+
+def _tab_local_storage_value(tab: Any, key: str) -> str:
+    """Read one non-secret runtime value from an existing page when exposed."""
+
+    try:
+        value = tab.run_js(
+            f"return localStorage.getItem({json.dumps(key, ensure_ascii=False)})"
+        )
+    except Exception:
+        return ""
+    return _as_nonempty_text(value)
+
+
+def _tab_window_value(tab: Any, global_name: str, key: str) -> str:
+    """Read one in-page runtime value without persisting it to disk."""
+
+    try:
+        value = tab.run_js(
+            "return (window[%s] && window[%s][%s]) || ''"
+            % (
+                json.dumps(global_name, ensure_ascii=False),
+                json.dumps(global_name, ensure_ascii=False),
+                json.dumps(key, ensure_ascii=False),
+            )
+        )
+    except Exception:
+        return ""
+    return _as_nonempty_text(value)
+
+
+def _set_tab_window_values(tab: Any, global_name: str, values: Mapping[str, str]) -> None:
+    """Keep transient context on a retained page for sibling workers."""
+
+    try:
+        encoded = json.dumps(dict(values), ensure_ascii=False, separators=(",", ":"))
+        tab.run_js(
+            "window[%s] = Object.assign(window[%s] || {}, %s); return true"
+            % (
+                json.dumps(global_name, ensure_ascii=False),
+                json.dumps(global_name, ensure_ascii=False),
+                encoded,
+            )
+        )
+    except Exception:
+        # Caching is an optimization; a failed injection must not fail a
+        # successful report capture.
+        pass
+
+
 class DrissionPageSessionProvider:
     """Attach to an already-running, manually logged-in Chrome session."""
 
@@ -598,21 +830,24 @@ class DrissionPageSessionProvider:
 
     def read_session(self) -> RuntimeSession:
         browser, tab = _open_flow_tab(self.browser_port)
+        existing = _find_existing_runtime_session(
+            browser,
+            tab,
+            self.expected_hosts,
+        )
+        if existing is not None:
+            browser.close_tab(tab)
+            return existing
         try:
-            tab.get(self.home_url)
+            _navigate_tab(tab, self.home_url, timeout=30)
             _wait_for_authenticated_tab(
                 tab,
                 platform_name=self.platform_name,
+                timeout=30,
                 expected_hosts=self.expected_hosts,
             )
             # MTop signing cookies can be scoped to a sibling Taobao domain.
-            cookies = tab.cookies(all_domains=True).as_dict()
-            cookie_header = cookie_header_from_mapping(cookies)
-            session = RuntimeSession(
-                cookie_header=cookie_header,
-                source="drissionpage",
-                cookie_count=_cookie_count(cookie_header),
-            )
+            session = _runtime_session_from_tab(tab)
         except Exception:
             # Keep the tab open on failure so a user can finish login or inspect
             # the page before retrying. The next attempt creates a fresh tab.
@@ -649,6 +884,25 @@ class DrissionPageSycmTokenSessionProvider:
         captured_token = token
         should_capture = not captured_token
         capture_started = False
+
+        # BYBT keeps its short-lived token in the already-loaded SYCM SPA.
+        # Reuse that tab first so a second collector does not navigate or
+        # attach another listener to the same business page.
+        existing_tab = _find_existing_tab(
+            browser,
+            tab,
+            ("sycm.taobao.com",),
+        )
+        if existing_tab is not None and should_capture:
+            captured_token = _tab_local_storage_value(existing_tab, "jycmToken")
+            should_capture = not captured_token
+        if existing_tab is not None and captured_token:
+            try:
+                session = _runtime_session_from_tab(existing_tab)
+            finally:
+                browser.close_tab(tab)
+            return SycmRuntimeContext(session=session, token=captured_token)
+
         if should_capture:
             tab.listen.start(
                 targets=self.request_target,
@@ -657,11 +911,11 @@ class DrissionPageSycmTokenSessionProvider:
             )
             capture_started = True
         try:
-            tab.get(self.home_url)
+            _navigate_tab(tab, self.home_url, timeout=max(self.timeout, 1.0))
             _wait_for_authenticated_tab(
                 tab,
                 platform_name=self.platform_name,
-                timeout=max(self.timeout, DEFAULT_BROWSER_LOGIN_TIMEOUT),
+                timeout=max(self.timeout, 1.0),
                 expected_hosts=("sycm.taobao.com",),
             )
             if should_capture:
@@ -705,9 +959,22 @@ class DrissionPageDatabankSessionProvider:
         self.timeout = timeout
 
     def read_context(self, *, csrf_token: str = "") -> DatabankRuntimeContext:
-        browser, tab = _open_flow_tab(self.browser_port)
+        browser, tab, owns_tab = _open_reusable_flow_tab(
+            self.browser_port, ("databank.tmall.com",)
+        )
+        if not owns_tab:
+            try:
+                session = _runtime_session_from_tab(tab)
+                existing_csrf = csrf_token or _runtime_cookie_value_from_tab(
+                    tab, "_tb_token_"
+                )
+            except RuntimeSessionUnavailable:
+                existing_csrf = ""
+                session = None
+            if session is not None and existing_csrf:
+                return DatabankRuntimeContext(session=session, csrf_token=existing_csrf)
         try:
-            tab.get(self.home_url)
+            _navigate_tab(tab, self.home_url, timeout=max(self.timeout, 1.0))
             _wait_for_authenticated_tab(
                 tab,
                 platform_name="品牌数据银行",
@@ -715,7 +982,7 @@ class DrissionPageDatabankSessionProvider:
             )
             cookies = tab.cookies(all_domains=True).as_dict()
             cookie_header = cookie_header_from_mapping(cookies)
-            csrf_token = csrf_token or _cookie_value(cookie_header, "_tb_token_")
+            csrf_token = csrf_token or _runtime_cookie_value_from_tab(tab, "_tb_token_")
             if not csrf_token:
                 raise RuntimeSessionUnavailable(
                     "品牌数据银行页面未提供 _tb_token_，请在采集标签页完成登录后重试。"
@@ -729,7 +996,6 @@ class DrissionPageDatabankSessionProvider:
         except Exception:
             raise
         else:
-            browser.close_tab(tab)
             return return_context
 
 
@@ -846,12 +1112,9 @@ def inspect_browser_platform_sessions(browser_port: int) -> list[BrowserPlatform
     """Inspect existing tabs without navigating or exposing session material."""
 
     browser = DrissionPageBrowser(browser_port)
-    try:
-        tabs = list(browser.browser.get_tabs())
-    except Exception as exc:
-        raise RuntimeSessionUnavailable("已连接采集浏览器，但暂时无法读取标签页。") from exc
     results: list[BrowserPlatformSession] = []
     for spec in _BROWSER_PLATFORM_SPECS.values():
+        tabs = _browser_tabs(browser, spec.hosts)
         probes = [_platform_tab_session(tab, spec) for tab in tabs]
         selected = next((item for item in probes if item.authenticated), None)
         if selected is None:
@@ -883,9 +1146,15 @@ def open_browser_platform_session(
         spec = _BROWSER_PLATFORM_SPECS[platform_code]
     except KeyError as exc:
         raise ValueError(f"Unsupported collection platform: {platform_code}") from exc
+
     browser, tab = _open_flow_tab(browser_port)
+    existing = _find_existing_platform_session(browser, tab, spec)
+    if existing is not None:
+        browser.close_tab(tab)
+        return existing
+
     try:
-        tab.get(spec.home_url)
+        _navigate_tab(tab, spec.home_url, timeout=timeout)
         deadline = time.monotonic() + max(1.0, timeout)
         probe = _platform_tab_session(
             tab,
@@ -931,11 +1200,34 @@ class DrissionPageAlimamaSessionProvider:
         self.timeout = timeout
 
     def read_context(self, *, csrf_id: str = "", login_point_id: str = "") -> AlimamaRuntimeContext:
-        browser, tab = _open_flow_tab(self.browser_port)
+        browser, tab, owns_tab = _open_reusable_flow_tab(
+            self.browser_port, ("one.alimama.com",)
+        )
         captured_csrf = csrf_id
         captured_login_point = login_point_id
         should_capture = not captured_csrf or not captured_login_point
         capture_started = False
+
+        # When the caller already has the one-time report parameters, an
+        # existing Alimama tab only needs to provide its authenticated Cookie.
+        # This is the common path for the second and later promotion workers.
+        if not owns_tab:
+            if should_capture:
+                captured_csrf = captured_csrf or _tab_window_value(
+                    tab, ALIMAMA_RUNTIME_GLOBAL, "csrfId"
+                )
+                captured_login_point = captured_login_point or _tab_window_value(
+                    tab, ALIMAMA_RUNTIME_GLOBAL, "loginPointId"
+                )
+                should_capture = not captured_csrf or not captured_login_point
+            if not should_capture:
+                session = _runtime_session_from_tab(tab)
+                return AlimamaRuntimeContext(
+                    session=session,
+                    csrf_id=captured_csrf,
+                    login_point_id=captured_login_point,
+                )
+
         if should_capture:
             tab.listen.start(
                 targets=r"one\.alimama\.com/report/query",
@@ -944,11 +1236,12 @@ class DrissionPageAlimamaSessionProvider:
             )
             capture_started = True
         try:
-            tab.get(self.report_home_url)
+            if owns_tab:
+                _navigate_tab(tab, self.report_home_url, timeout=max(self.timeout, 1.0))
             _wait_for_authenticated_tab(
                 tab,
                 platform_name="阿里妈妈",
-                timeout=max(self.timeout, DEFAULT_BROWSER_LOGIN_TIMEOUT),
+                timeout=max(self.timeout, 1.0),
                 expected_hosts=("one.alimama.com",),
             )
 
@@ -980,7 +1273,13 @@ class DrissionPageAlimamaSessionProvider:
             csrf_id=captured_csrf,
             login_point_id=captured_login_point,
         )
-        browser.close_tab(tab)
+        # Keep the first report tab open so item/content sibling workers can
+        # reuse this page and its transient request parameters.
+        _set_tab_window_values(
+            tab,
+            ALIMAMA_RUNTIME_GLOBAL,
+            {"csrfId": captured_csrf, "loginPointId": captured_login_point},
+        )
         return context
 
 
@@ -1023,17 +1322,36 @@ class DrissionPageBrandSearchSessionProvider:
         browser, tab = _open_flow_tab(self.browser_port)
         captured_csrf = csrf_id
         captured_params: dict[str, str] = {}
+        existing_tab = _find_existing_tab(
+            browser,
+            tab,
+            ("branding.taobao.com", "brandsearch.taobao.com"),
+        )
+        if existing_tab is not None and captured_csrf:
+            session = _runtime_session_from_tab(existing_tab)
+            browser.close_tab(tab)
+            return BrandSearchRuntimeContext(
+                session=session,
+                csrf_id=captured_csrf,
+                query_params={
+                    "r": "mx_548",
+                    "attribution": "impression",
+                    "effectConversionCycle": "30",
+                    "trafficType": "[1,2,4,5]",
+                    "csrfID": captured_csrf,
+                },
+            )
         tab.listen.start(
             targets=r"brandsearch\.taobao\.com/report/query/rptAdvertiserSubListNew\.json",
             is_regex=True,
             method="GET",
         )
         try:
-            tab.get(self.report_home_url)
+            _navigate_tab(tab, self.report_home_url, timeout=max(self.timeout, 1.0))
             _wait_for_authenticated_tab(
                 tab,
                 platform_name="品销宝品牌专区",
-                timeout=max(self.timeout, DEFAULT_BROWSER_LOGIN_TIMEOUT),
+                timeout=max(self.timeout, 1.0),
                 expected_hosts=("branding.taobao.com", "brandsearch.taobao.com"),
             )
 
@@ -1095,10 +1413,30 @@ class DrissionPageCpsSessionProvider:
         self.timeout = timeout
 
     def read_context(self, *, tb_token: str = "") -> CpsRuntimeContext:
-        browser, tab = _open_flow_tab(self.browser_port)
+        browser, tab, owns_tab = _open_reusable_flow_tab(
+            self.browser_port, ("ad.alimama.com",)
+        )
         captured_token = tb_token
         should_capture = not captured_token
         capture_started = False
+
+        # The CPS page exposes the same short-lived token as a cookie.  A
+        # previously opened report tab is therefore enough for all CPS child
+        # jobs; request listening remains a fallback for fresh sessions.
+        if not owns_tab:
+            if _cps_requires_primary_account(tab):
+                browser.close_tab(tab)
+                raise RuntimeSessionUnavailable(
+                    "CPS 暂不支持当前子账号，请在采集浏览器中切换为主账号后重试。"
+                )
+            try:
+                session = _runtime_session_from_tab(tab)
+                captured_token = captured_token or _runtime_cookie_value_from_tab(tab, "_tb_token_")
+            except RuntimeSessionUnavailable:
+                session = None
+            if session is not None and captured_token:
+                return CpsRuntimeContext(session=session, tb_token=captured_token)
+
         if should_capture:
             tab.listen.start(
                 targets=r"ad\.alimama\.com/openapi/param2/1/gateway\.unionadv/data\.home\.overview\.json",
@@ -1107,11 +1445,11 @@ class DrissionPageCpsSessionProvider:
             )
             capture_started = True
         try:
-            tab.get(self.report_home_url)
+            _navigate_tab(tab, self.report_home_url, timeout=max(self.timeout, 1.0))
             _wait_for_authenticated_tab(
                 tab,
                 platform_name="淘宝客 CPS",
-                timeout=max(self.timeout, DEFAULT_BROWSER_LOGIN_TIMEOUT),
+                timeout=max(self.timeout, 1.0),
                 expected_hosts=("ad.alimama.com",),
             )
             if _cps_requires_primary_account(tab):
@@ -1141,7 +1479,9 @@ class DrissionPageCpsSessionProvider:
             cookie_count=_cookie_count(cookie_header),
         )
         context = CpsRuntimeContext(session=session, tb_token=captured_token)
-        browser.close_tab(tab)
+        # Retain the first CPS report tab so later CPS retries reuse its
+        # session without another navigation. The browser is user-owned and
+        # will clean up the tab when the user closes it.
         return context
 
 
@@ -1160,18 +1500,21 @@ class DrissionPageUtrySessionProvider:
         self.timeout = timeout
 
     def read_context(self) -> UtryRuntimeContext:
-        browser, tab = _open_flow_tab(self.browser_port)
+        browser, tab, owns_tab = _open_reusable_flow_tab(
+            self.browser_port, ("tmesh.tmall.com",)
+        )
         templates: dict[int, UtryReportTemplate] = {}
         # The U先 parent app can resolve several Quark report URLs in one
         # MTop request. Each URL contains the server-issued QUARK_PARAMS for the
         # current login session. Going directly to those URLs avoids opening
         # two parent pages and refreshing two already-loaded iframes.
         try:
-            tab.get(self.report_home_url)
+            if owns_tab:
+                _navigate_tab(tab, self.report_home_url, timeout=max(self.timeout, 1.0))
             _wait_for_authenticated_tab(
                 tab,
                 platform_name="U先",
-                timeout=max(self.timeout, DEFAULT_BROWSER_LOGIN_TIMEOUT),
+                timeout=max(self.timeout, 1.0),
             )
             report_urls = _resolve_utry_dashboard_urls(
                 tab,
@@ -1216,7 +1559,8 @@ class DrissionPageUtrySessionProvider:
             ),
             templates=templates,
         )
-        browser.close_tab(tab)
+        # Keep the parent report tab available for subsequent retries. The
+        # two short-lived Quark capture tabs are still closed by their worker.
         return context
 
 
@@ -1324,11 +1668,11 @@ def _capture_utry_template_from_direct_url(
 
     tab.listen.start(targets="fbi", is_regex=True, method="POST")
     try:
-        tab.get(report_url)
+        _navigate_tab(tab, report_url, timeout=max(timeout, 1.0))
         _wait_for_authenticated_tab(
             tab,
             platform_name="U先",
-            timeout=max(timeout, DEFAULT_BROWSER_LOGIN_TIMEOUT),
+            timeout=max(timeout, 1.0),
         )
         for packet in tab.listen.steps(timeout=timeout):
             template = _extract_utry_request_template(packet)
@@ -1388,11 +1732,11 @@ def _capture_utry_template_from_parent_page(
 ) -> UtryReportTemplate | None:
     """Compatibility path used when batched Quark URL resolution fails."""
 
-    tab.get(UTRY_REPORT_URLS[report_id])
+    _navigate_tab(tab, UTRY_REPORT_URLS[report_id], timeout=max(timeout, 1.0))
     _wait_for_authenticated_tab(
         tab,
         platform_name="U先",
-        timeout=max(timeout, DEFAULT_BROWSER_LOGIN_TIMEOUT),
+        timeout=max(timeout, 1.0),
     )
     frame = _find_utry_frame(tab, timeout=timeout)
     if frame is None:

@@ -267,29 +267,37 @@ class LocalWarehouseAnalyticsRepository:
         """Return date coverage for every dataset exposed by the dashboard."""
         expected_days = (end_date - start_date).days + 1
         coverage: list[DataCoverage] = []
-        for label, table in self._dataset_tables():
-            bounds = self._rows(
-                f'''select min("业务日期") as first_date, max("业务日期") as latest_date
-                    from {table} where "店铺ID" = ?''',
-                self._store_id,
+        dataset_tables = self._dataset_tables()
+        statements: list[str] = []
+        parameters: list[object] = []
+        for label, table in dataset_tables:
+            statements.append(
+                f'''select ? as dataset,
+                           min("业务日期") as first_date,
+                           max("业务日期") as latest_date,
+                           group_concat(distinct case
+                               when "业务日期" between ? and ? then "业务日期"
+                           end) as available_dates
+                    from {table} where "店铺ID" = ?'''
             )
-            dates = self._rows(
-                f'''select distinct "业务日期" as business_day from {table}
-                    where "店铺ID" = ? and "业务日期" between ? and ?''',
-                self._store_id,
-                start_date.isoformat(),
-                end_date.isoformat(),
-            )
+            parameters.extend((label, start_date.isoformat(), end_date.isoformat(), self._store_id))
+        rows_by_label = {
+            str(row["dataset"]): row
+            for row in self._rows(" union all ".join(statements), *parameters)
+        }
+        empty_days_by_label = self._successful_empty_report_days_by_label(
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        for label, _table in dataset_tables:
+            bounds = rows_by_label.get(label, {})
             available = {
-                date.fromisoformat(str(row["business_day"]))
-                for row in dates
-                if row["business_day"]
+                date.fromisoformat(value)
+                for value in str(bounds.get("available_dates") or "").split(",")
+                if value
             }
-            confirmed_empty_days = self._successful_empty_report_days(
-                label=label,
-                start_date=start_date,
-                end_date=end_date,
-            )
+            confirmed_empty_days = empty_days_by_label.get(label, set())
             # A successful empty crawl is only "platform has no data" when
             # the normalized table truly has no row for that day.  If a later
             # or duplicate ingestion produced rows, physical data wins and
@@ -301,8 +309,8 @@ class LocalWarehouseAnalyticsRepository:
                 for offset in range(expected_days)
                 if start_date + timedelta(days=offset) not in available
             ]
-            first_date = bounds[0]["first_date"] if bounds and bounds[0]["first_date"] else None
-            latest_date = bounds[0]["latest_date"] if bounds and bounds[0]["latest_date"] else None
+            first_date = bounds.get("first_date")
+            latest_date = bounds.get("latest_date")
             if confirmed_no_data_days:
                 confirmed_first = min(confirmed_no_data_days).isoformat()
                 confirmed_latest = max(confirmed_no_data_days).isoformat()
@@ -570,37 +578,43 @@ class LocalWarehouseAnalyticsRepository:
             warnings=warnings,
         )
 
-    def _successful_empty_report_days(
+    def _successful_empty_report_days_by_label(
         self,
         *,
-        label: str,
         start_date: date,
         end_date: date,
-    ) -> set[date]:
-        task_type = _CRAWL_COVERAGE_TASKS.get(label)
-        if task_type is None:
-            return set()
+    ) -> dict[str, set[date]]:
+        task_types = sorted(set(_CRAWL_COVERAGE_TASKS.values()))
+        if not task_types:
+            return {}
 
         rows = self._rows(
             f"""
-            select distinct days.{q(BUSINESS_DAY)} as business_day
+            select distinct runs.{q(CRAWL_TASK_TYPE)} as task_type,
+                            days.{q(BUSINESS_DAY)} as business_day
             from crawl_run_days as days
             inner join crawl_runs as runs
               on runs.{q(CRAWL_RUN_ID)} = days.{q(CRAWL_RUN_ID)}
             where days.{q(STORE_ID)} = ?
-              and runs.{q(CRAWL_TASK_TYPE)} = ?
+              and runs.{q(CRAWL_TASK_TYPE)} in ({", ".join("?" for _ in task_types)})
               and days.{q(DAY_STATUS)} in ('ingested', 'no_data')
               and days.{q(BUSINESS_DAY)} between ? and ?
             """,
             self._store_id,
-            task_type,
+            *task_types,
             start_date.isoformat(),
             end_date.isoformat(),
         )
+        days_by_task: dict[str, set[date]] = {}
+        for row in rows:
+            if not row["business_day"]:
+                continue
+            days_by_task.setdefault(str(row["task_type"]), set()).add(
+                date.fromisoformat(str(row["business_day"]))
+            )
         return {
-            date.fromisoformat(str(row["business_day"]))
-            for row in rows
-            if row["business_day"]
+            label: set(days_by_task.get(task_type, set()))
+            for label, task_type in _CRAWL_COVERAGE_TASKS.items()
         }
 
     def get_product_date_bounds(self) -> tuple[date, date]:

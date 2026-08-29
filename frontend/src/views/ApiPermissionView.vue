@@ -1,14 +1,21 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue"
+import { computed, ref } from "vue"
 import { CircleAlert, LoaderCircle, RefreshCw, Search, ShieldCheck, X } from "lucide-vue-next"
 
 import SystemAdminHeader from "@/components/SystemAdminHeader.vue"
+import { useAsyncData } from "@/composables/useAsyncData"
 import { fetchApiPermissions } from "@/api"
 import type { ApiPermissionRecord } from "@/types"
 
-const records = ref<ApiPermissionRecord[]>([])
-const loading = ref(true)
-const error = ref("")
+const {
+  data: records,
+  loading,
+  error,
+  refresh: load,
+} = useAsyncData<ApiPermissionRecord[]>(fetchApiPermissions, {
+  initialData: [],
+  errorMessage: "接口权限目录读取失败。",
+})
 const pathDraft = ref("")
 const nameDraft = ref("")
 const moduleDraft = ref("all")
@@ -33,18 +40,6 @@ const filteredRecords = computed(() => {
   })
 })
 
-async function load(): Promise<void> {
-  loading.value = true
-  error.value = ""
-  try {
-    records.value = await fetchApiPermissions()
-  } catch (requestError) {
-    error.value = requestError instanceof Error ? requestError.message : "接口权限目录读取失败。"
-  } finally {
-    loading.value = false
-  }
-}
-
 function queryRecords(): void {
   pathFilter.value = pathDraft.value
   nameFilter.value = nameDraft.value
@@ -64,7 +59,6 @@ function methodClass(method: string): string {
   return method.toLocaleLowerCase()
 }
 
-onMounted(() => { void load() })
 </script>
 
 <template>

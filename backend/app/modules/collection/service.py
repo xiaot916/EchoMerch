@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
 import threading
-import time
 import uuid
 from datetime import date, datetime, time as clock_time, timedelta
 from pathlib import Path
@@ -47,6 +47,9 @@ from app.modules.collection.schemas import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 class CollectionBatchConflict(RuntimeError):
     pass
 
@@ -59,9 +62,9 @@ class CollectionService:
     def __init__(self, database_path: Path | None = None) -> None:
         self.database_path = Path(database_path or settings.local_database_path).resolve()
         self.database = LocalDatabase(self.database_path)
+        self.database.initialize_schema()
 
     def overview(self, *, target_day: date | None = None, recent_day_count: int = 7) -> CollectionOverview:
-        self.database.initialize_schema()
         day = target_day or yesterday_in_shanghai()
         self._reconcile_stale_batches()
         with self.database.connect() as conn:
@@ -105,7 +108,6 @@ class CollectionService:
         trigger: str,
         resume_from_latest: bool = False,
     ) -> CollectionBatch:
-        self.database.initialize_schema()
         names = self._validate_dataset_names(dataset_names)
         feedback_run = active_feedback_run(self.database_path)
         if feedback_run is not None:
@@ -120,19 +122,25 @@ class CollectionService:
         log_dir = self.database_path.parent / "daily_collection" / "batches"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"{batch_id}.log"
-        with self.database.connect(initialize=True) as conn:
-            self._reconcile_running_batches(conn)
+        with self.database.connect(read_only=False) as conn:
+            conn.execute("begin immediate")
+            self._reconcile_running_batches(conn, commit=False)
             active = conn.execute(
                 "select batch_id from collection_batches where status = 'running' limit 1"
             ).fetchone()
             if active is not None:
+                conn.rollback()
                 raise CollectionBatchConflict(f"采集批次正在运行：{active['batch_id']}")
-            conn.execute(
+            cursor = conn.execute(
                 """
                 insert into collection_batches (
                     batch_id, business_day, dataset_names_json, trigger_type,
                     session_source, refresh_existing, status, started_at, log_file
-                ) values (?, ?, ?, ?, ?, ?, 'running', ?, ?)
+                )
+                select ?, ?, ?, ?, ?, ?, 'running', ?, ?
+                where not exists (
+                    select 1 from collection_batches where status = 'running'
+                )
                 """,
                 (
                     batch_id, business_day.isoformat(), json.dumps(names, ensure_ascii=False),
@@ -140,11 +148,21 @@ class CollectionService:
                     str(log_path),
                 ),
             )
+            if cursor.rowcount != 1:
+                active = conn.execute(
+                    "select batch_id from collection_batches where status = 'running' limit 1"
+                ).fetchone()
+                conn.rollback()
+                raise CollectionBatchConflict(
+                    f"采集批次正在运行：{active['batch_id'] if active else 'unknown'}"
+                )
             conn.commit()
 
+        # Respect the caller's dataset scope.  Historically every manual
+        # single-dataset retry also appended the comparatively heavy market
+        # collector, which made a focused retry wait on unrelated requests and
+        # hid the real completion time from the operator.
         command_names = list(names)
-        if "sycm_market" not in command_names:
-            command_names.append("sycm_market")
         command = [
             sys.executable,
             str(PROJECT_ROOT / "backend" / "scripts" / "collect_daily.py"),
@@ -181,7 +199,7 @@ class CollectionService:
             log_handle.close()
             self._finish_batch(batch_id, status="failed", error_message=str(exc))
             raise
-        with self.database.connect(initialize=True) as conn:
+        with self.database.connect(read_only=False) as conn:
             conn.execute(
                 "update collection_batches set process_id = ? where batch_id = ?",
                 (process.pid, batch_id),
@@ -196,7 +214,6 @@ class CollectionService:
         return self.get_batch(batch_id)
 
     def get_batch(self, batch_id: str) -> CollectionBatch:
-        self.database.initialize_schema()
         self._reconcile_stale_batches()
         with self.database.connect() as conn:
             row = conn.execute(
@@ -207,7 +224,6 @@ class CollectionService:
         return self._batch_from_row(row)
 
     def list_batches(self, limit: int = 20) -> list[CollectionBatch]:
-        self.database.initialize_schema()
         self._reconcile_stale_batches()
         with self.database.connect() as conn:
             rows = conn.execute(
@@ -217,7 +233,6 @@ class CollectionService:
         return [self._batch_from_row(row) for row in rows]
 
     def get_schedule(self) -> CollectionSchedule:
-        self.database.initialize_schema()
         with self.database.connect() as conn:
             return self._get_schedule(conn)
 
@@ -229,13 +244,12 @@ class CollectionService:
         dataset_names: Iterable[str] | None,
         session_source: str,
     ) -> CollectionSchedule:
-        self.database.initialize_schema()
         self._parse_run_time(run_time)
         names = self._validate_dataset_names(dataset_names)
         if session_source not in {"env", "drissionpage"}:
             raise CollectionConfigurationError("session_source must be env or drissionpage")
         now = datetime.now().astimezone().isoformat(timespec="seconds")
-        with self.database.connect(initialize=True) as conn:
+        with self.database.connect(read_only=False) as conn:
             conn.execute(
                 """
                 insert into collection_schedule (
@@ -290,7 +304,7 @@ class CollectionService:
             )
         except CollectionBatchConflict:
             return None
-        with self.database.connect(initialize=True) as conn:
+        with self.database.connect(read_only=False) as conn:
             conn.execute(
                 """
                 update collection_schedule
@@ -646,7 +660,7 @@ class CollectionService:
         self, batch_id: str, *, status: str, completed_count: int = 0,
         failed_count: int = 0, error_message: str | None = None,
     ) -> None:
-        with self.database.connect(initialize=True) as conn:
+        with self.database.connect(read_only=False) as conn:
             conn.execute(
                 """
                 update collection_batches set status = ?, completed_count = ?,
@@ -661,7 +675,7 @@ class CollectionService:
             )
             conn.commit()
 
-    def _reconcile_running_batches(self, conn) -> None:
+    def _reconcile_running_batches(self, conn, *, commit: bool = True) -> None:
         rows = conn.execute(
             "select * from collection_batches where status = 'running'"
         ).fetchall()
@@ -694,11 +708,11 @@ class CollectionService:
                 ),
             )
             changed = True
-        if changed:
+        if changed and commit:
             conn.commit()
 
     def _reconcile_stale_batches(self) -> None:
-        with self.database.connect(initialize=True) as conn:
+        with self.database.connect(read_only=False) as conn:
             self._reconcile_running_batches(conn)
 
     @staticmethod
@@ -1060,7 +1074,7 @@ class CollectionService:
 
     def _batch_from_row(self, row, conn=None) -> CollectionBatch:
         owns_connection = conn is None
-        connection = conn or self.database.connect(initialize=True)
+        connection = conn or self.database.connect()
         try:
             progress = self._batch_progress(connection, row)
             stored_status = str(row["status"] or "")
@@ -1122,14 +1136,24 @@ class CollectionScheduler:
         self._stop_event.set()
 
     def _run(self) -> None:
-        service = CollectionService()
-        while not self._stop_event.wait(30):
+        # Check immediately on API startup so a service restart does not add a
+        # full polling interval to a due collection.  Keep the interval short
+        # enough to react to a saved schedule within a few seconds while the
+        # persisted target-day guard still prevents duplicate batches.
+        poll_interval = 5.0
+        backoff = poll_interval
+        service: CollectionService | None = None
+        while not self._stop_event.is_set():
             try:
+                if service is None:
+                    service = CollectionService()
                 service.trigger_schedule_if_due()
+                backoff = poll_interval
             except Exception:
-                # A scheduler error must not take down the API process. The next
-                # polling cycle retries and batch errors are persisted separately.
-                time.sleep(1)
+                logger.exception("采集调度轮询失败")
+                service = None
+                backoff = min(backoff * 2, 60.0)
+            self._stop_event.wait(backoff)
 
 
 collection_scheduler = CollectionScheduler()

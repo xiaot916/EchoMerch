@@ -2,9 +2,38 @@ import sqlite3
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from app.core.local_database import LocalDatabase
 from app.integrations.local_warehouse.repository import LocalWarehouseAnalyticsRepository
 from app.modules.imports.crawl_run_store import CrawlRunStore
+
+
+def test_data_coverage_batches_dataset_queries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "coverage-query-count.sqlite3"
+    LocalDatabase(database_path).initialize_schema()
+    CrawlRunStore(database_path).ensure_store_reference(
+        store_id=1,
+        store_name="Store 1",
+        platform_store_id="p-1",
+    )
+    repository = LocalWarehouseAnalyticsRepository(database_path, store_id=1)
+    original = repository._rows
+    calls = 0
+
+    def counted(statement: str, *params: object):
+        nonlocal calls
+        calls += 1
+        return original(statement, *params)
+
+    monkeypatch.setattr(repository, "_rows", counted)
+    coverage = repository.get_data_coverage(date(2026, 8, 1), date(2026, 8, 7))
+
+    assert len(coverage) == len(repository._dataset_tables())
+    assert calls == 2
 
 
 def test_prefers_campaign_level_promotion_metrics_when_available(tmp_path: Path) -> None:

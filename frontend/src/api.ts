@@ -366,7 +366,7 @@ async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
   return response.json() as Promise<T>
 }
 
-async function apiPost<T>(path: string, body: Record<string, unknown>): Promise<T> {
+async function apiPost<T>(path: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",
     headers: {
@@ -374,6 +374,7 @@ async function apiPost<T>(path: string, body: Record<string, unknown>): Promise<
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
+    signal,
     credentials: "include",
   })
 
@@ -854,8 +855,27 @@ export async function fetchCrawlRun(runId: string): Promise<CrawlRunDetail> {
   return apiGet<CrawlRunDetail>(`/api/v1/imports/crawl-runs/${encodeURIComponent(runId)}`)
 }
 
-export async function fetchStores(): Promise<StoreRecord[]> {
-  return apiGet<StoreRecord[]>("/api/v1/warehouse/stores")
+const STORES_CACHE_TTL_MS = 5 * 60 * 1000
+let storesCache: { data: StoreRecord[]; expiresAt: number } | null = null
+let storesRequest: Promise<StoreRecord[]> | null = null
+
+/** Share the store directory across views while allowing an explicit refresh. */
+export async function fetchStores(forceRefresh = false): Promise<StoreRecord[]> {
+  const now = Date.now()
+  if (!forceRefresh && storesCache && storesCache.expiresAt > now) {
+    return storesCache.data
+  }
+  if (storesRequest) return storesRequest
+
+  storesRequest = apiGet<StoreRecord[]>("/api/v1/warehouse/stores")
+    .then((data) => {
+      storesCache = { data, expiresAt: Date.now() + STORES_CACHE_TTL_MS }
+      return data
+    })
+    .finally(() => {
+      storesRequest = null
+    })
+  return storesRequest
 }
 
 export async function fetchBrandAssetsBrands(): Promise<BrandRecord[]> {
@@ -1059,8 +1079,8 @@ export async function updateRoleAccess(roleCode: string, request: {
   })
 }
 
-export async function fetchApiPermissions(): Promise<ApiPermissionRecord[]> {
-  return apiGet<ApiPermissionRecord[]>("/api/v1/access/api-permissions")
+export async function fetchApiPermissions(signal?: AbortSignal): Promise<ApiPermissionRecord[]> {
+  return apiGet<ApiPermissionRecord[]>("/api/v1/access/api-permissions", signal)
 }
 
 export async function createAccessUser(request: {
@@ -1135,13 +1155,24 @@ export async function startDailyCollection(request: {
   refreshExisting?: boolean
   resumeFromLatest?: boolean
 }): Promise<CollectionBatch> {
-  return apiPost<CollectionBatch>("/api/v1/imports/collect", {
-    day: request.day,
-    dataset_names: request.datasetNames ?? [],
-    session_source: request.sessionSource ?? "drissionpage",
-    refresh_existing: request.refreshExisting ?? false,
-    resume_from_latest: request.resumeFromLatest ?? true,
-  })
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), 30_000)
+  try {
+    return await apiPost<CollectionBatch>("/api/v1/imports/collect", {
+      day: request.day,
+      dataset_names: request.datasetNames ?? [],
+      session_source: request.sessionSource ?? "drissionpage",
+      refresh_existing: request.refreshExisting ?? false,
+      resume_from_latest: request.resumeFromLatest ?? true,
+    }, controller.signal)
+  } catch (error) {
+    if (error && typeof error === "object" && "name" in error && error.name === "AbortError") {
+      throw new Error("采集启动超过 30 秒仍未返回，请检查采集浏览器页面和网络后重试。")
+    }
+    throw error
+  } finally {
+    window.clearTimeout(timeout)
+  }
 }
 
 export async function updateCollectionSchedule(request: {

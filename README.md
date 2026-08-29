@@ -85,13 +85,18 @@ python backend/scripts/backfill_sycm_overviews.py `
 
 Use the unified collector for the normal daily run. With no `--day`, it always
 targets yesterday in `Asia/Shanghai`, so running it on 2026-08-21 collects the
-completed business day 2026-08-20. Existing rows are skipped by the individual
-workers, making a retry safe by default.
+completed business day 2026-08-20. Independent workers run with bounded
+parallelism (default 2) to reduce end-to-end latency, while existing rows are
+still skipped by the individual workers so retries remain safe by default.
 
 ```powershell
 python backend/scripts/collect_daily.py `
   --session-source drissionpage
 ```
+
+Use `--parallelism 1` when diagnosing a platform or browser-session issue; the
+range is intentionally bounded to 1-8 workers. You can set the default with
+`ECHO_COLLECTION_PARALLELISM`.
 
 Inspect the resolved date and child commands without making network requests:
 

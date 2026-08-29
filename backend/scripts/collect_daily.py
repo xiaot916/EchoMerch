@@ -9,6 +9,7 @@ first fully completed report day at the time a daily scheduler normally runs.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
 import subprocess
@@ -494,12 +495,16 @@ def run_collection(
     promotion_refresh_days: int = 0,
     resume_from_latest: bool = False,
     mutable_refresh_days: int = 4,
+    parallelism: int = 2,
 ) -> tuple[int, dict[str, object]]:
+    if parallelism < 1:
+        raise ValueError("parallelism must be at least 1")
     specs = selected_specs(dataset_names)
     started_at = datetime.now().astimezone()
     results: list[dict[str, object]] = []
     child_env = os.environ.copy()
     child_env["PYTHONIOENCODING"] = "utf-8"
+    jobs: list[tuple[DatasetSpec, list[str], str]] = []
     for spec in specs:
         for command in _commands_for_spec(
             spec,
@@ -513,60 +518,77 @@ def run_collection(
             resume_from_latest=resume_from_latest,
             mutable_refresh_days=mutable_refresh_days,
         ):
-            detail = (
-                command[-1]
-                if spec.name in {"alimama_adgroup_bidwords", "alimama_promotion_details"}
-                else None
-            )
+            detail = command[-1] if spec.name in {"alimama_adgroup_bidwords", "alimama_promotion_details"} else None
             label = spec.name if detail is None else f"{spec.name}:{detail}"
-            print(f"[{label}] collecting {day.isoformat()} ...", flush=True)
-            try:
-                completed = subprocess.run(
-                    command,
-                    cwd=PROJECT_ROOT,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    env=child_env,
-                    timeout=timeout,
-                    check=False,
-                )
-                result: dict[str, object] = {
-                    "dataset": label,
-                    "status": "completed" if completed.returncode == 0 else "failed",
-                    "returncode": completed.returncode,
-                    "stdout": completed.stdout[-12000:],
-                    "stderr": completed.stderr[-12000:],
-                }
-            except subprocess.TimeoutExpired as exc:
-                cleaned_run_id = _cleanup_timed_out_crawl_run(
-                    database_path=database_path,
-                    label=label,
-                    day=day,
-                    timeout=timeout,
-                )
-                result = {
-                    "dataset": label,
-                    "status": "failed",
-                    "returncode": None,
-                    "error": f"timed out after {timeout} seconds",
-                    "crawl_run_id": cleaned_run_id,
-                    "stdout": (exc.stdout or "")[-12000:],
-                    "stderr": (exc.stderr or "")[-12000:],
-                }
+            jobs.append((spec, command, label))
+
+    def execute(job: tuple[DatasetSpec, list[str], str]) -> dict[str, object]:
+        _spec, command, label = job
+        print(f"[{label}] collecting {day.isoformat()} ...", flush=True)
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=child_env,
+                timeout=timeout,
+                check=False,
+            )
+            result: dict[str, object] = {
+                "dataset": label,
+                "status": "completed" if completed.returncode == 0 else "failed",
+                "returncode": completed.returncode,
+                "stdout": completed.stdout[-12000:],
+                "stderr": completed.stderr[-12000:],
+            }
+        except subprocess.TimeoutExpired as exc:
+            cleaned_run_id = _cleanup_timed_out_crawl_run(
+                database_path=database_path,
+                label=label,
+                day=day,
+                timeout=timeout,
+            )
+            result = {
+                "dataset": label,
+                "status": "failed",
+                "returncode": None,
+                "error": f"timed out after {timeout} seconds",
+                "crawl_run_id": cleaned_run_id,
+                "stdout": (exc.stdout or "")[-12000:],
+                "stderr": (exc.stderr or "")[-12000:],
+            }
+        if result["status"] == "completed":
+            print(f"[{label}] completed", flush=True)
+        else:
+            detail = str(result.get("error") or result.get("stderr") or result.get("stdout") or "")
+            detail_lines = [line.strip() for line in detail.splitlines() if line.strip()]
+            concise_detail = detail_lines[-1][:320] if detail_lines else "子任务未返回错误详情"
+            print(f"[{label}] failed: {concise_detail}", flush=True)
+        return result
+
+    if parallelism == 1 or fail_fast or len(jobs) <= 1:
+        for job in jobs:
+            result = execute(job)
             results.append(result)
-            if result["status"] == "completed":
-                print(f"[{label}] completed", flush=True)
-            else:
-                detail = str(result.get("error") or result.get("stderr") or result.get("stdout") or "")
-                detail_lines = [line.strip() for line in detail.splitlines() if line.strip()]
-                concise_detail = detail_lines[-1][:320] if detail_lines else "子任务未返回错误详情"
-                print(f"[{label}] failed: {concise_detail}", flush=True)
-                if fail_fast:
-                    break
-        if fail_fast and results and results[-1]["status"] != "completed":
-            break
+            if fail_fast and result["status"] != "completed":
+                break
+    else:
+        # The browser adapter gives every worker its own tab and SQLite runs in
+        # WAL mode.  A small bounded pool keeps independent datasets moving
+        # without opening one tab/process per dataset or overwhelming the
+        # platform and local database with burst traffic.
+        with ThreadPoolExecutor(max_workers=min(parallelism, len(jobs)), thread_name_prefix="daily-collector") as executor:
+            future_positions = {
+                executor.submit(execute, job): index
+                for index, job in enumerate(jobs)
+            }
+            ordered_results: list[dict[str, object] | None] = [None] * len(jobs)
+            for future in as_completed(future_positions):
+                ordered_results[future_positions[future]] = future.result()
+            results.extend(result for result in ordered_results if result is not None)
 
     failed = [item for item in results if item["status"] != "completed"]
     summary: dict[str, object] = {
@@ -630,6 +652,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=4,
         help="Trailing days to refresh for delayed BYBT, content, new-customer, and flash-sale reports.",
     )
+    parser.add_argument(
+        "--parallelism",
+        type=int,
+        default=max(1, int(os.getenv("ECHO_COLLECTION_PARALLELISM", "2"))),
+        help="Maximum child workers to run concurrently (default: 2; use 1 for strict serial execution).",
+    )
     parser.add_argument("--plan", action="store_true", help="Print the resolved plan without starting workers.")
     parser.add_argument("--list-datasets", action="store_true", help="List available dataset names and exit.")
     args = parser.parse_args(argv)
@@ -644,6 +672,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--promotion-refresh-days must be zero or positive")
     if args.mutable_refresh_days < 1:
         parser.error("--mutable-refresh-days must be at least one")
+    if args.parallelism < 1 or args.parallelism > 8:
+        parser.error("--parallelism must be between 1 and 8")
     args.database_path = args.database_path.expanduser().resolve()
     specs = selected_specs(args.datasets)
     commands = [
@@ -669,6 +699,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "session_source": args.session_source,
         "datasets": list(args.datasets),
         "resume_from_latest": args.resume_from_latest,
+        "parallelism": args.parallelism,
         "commands": commands,
     }
     if args.plan:
@@ -688,6 +719,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         promotion_refresh_days=args.promotion_refresh_days,
         resume_from_latest=args.resume_from_latest,
         mutable_refresh_days=args.mutable_refresh_days,
+        parallelism=args.parallelism,
     )
     log_dir = args.database_path.parent / "daily_collection"
     log_path = log_dir / (

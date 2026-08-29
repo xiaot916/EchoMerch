@@ -14,7 +14,6 @@ _STALE_FEEDBACK_ERROR = "采集任务长时间没有进展，已自动释放任�
 def active_daily_batch(database_path: Path) -> str | None:
     """Return the running daily batch id, if one is occupying the browser."""
     database = LocalDatabase(database_path)
-    database.initialize_schema()
     with database.connect() as conn:
         row = conn.execute(
             "select batch_id from collection_batches where status = 'running' "
@@ -26,8 +25,7 @@ def active_daily_batch(database_path: Path) -> str | None:
 def active_feedback_run(database_path: Path) -> tuple[str, str] | None:
     """Return the active review/ask run that is occupying the browser."""
     database = LocalDatabase(database_path)
-    database.initialize_schema()
-    with database.connect(initialize=True) as conn:
+    with database.connect(read_only=False) as conn:
         for table, label in (
             ("review_collection_runs", "评价"),
             ("ask_collection_runs", "问答"),

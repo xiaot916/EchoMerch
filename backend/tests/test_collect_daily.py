@@ -201,3 +201,39 @@ def test_timed_out_child_closes_its_crawl_ledger(monkeypatch, tmp_path) -> None:
         }
     ]
     assert summary["results"][0]["crawl_run_id"] == "crawl-timeout-run"
+
+
+def test_plan_exposes_bounded_parallelism(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        collect_daily,
+        "yesterday_in_shanghai",
+        lambda: date(2026, 8, 20),
+    )
+
+    assert collect_daily.main([
+        "--plan",
+        "--datasets",
+        "sycm_overviews,sycm_bybt",
+        "--parallelism",
+        "3",
+    ]) == 0
+    plan = json.loads(capsys.readouterr().out)
+
+    assert plan["parallelism"] == 3
+
+
+def test_parallelism_must_be_positive() -> None:
+    try:
+        collect_daily.run_collection(
+            day=date(2026, 8, 20),
+            dataset_names=["sycm_overviews"],
+            database_path=collect_daily.PROJECT_ROOT / "test.sqlite3",
+            session_source="drissionpage",
+            cookie_env="SYCM_COOKIE",
+            browser_port=9222,
+            parallelism=0,
+        )
+    except ValueError as exc:
+        assert "parallelism" in str(exc)
+    else:
+        raise AssertionError("parallelism=0 should be rejected")

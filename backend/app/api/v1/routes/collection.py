@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -46,6 +47,9 @@ from app.modules.collection.service import (
 )
 
 router = APIRouter()
+
+COLLECTION_PREFLIGHT_TIMEOUT_SECONDS = 20.0
+COLLECTION_PLATFORM_PROBE_TIMEOUT_SECONDS = 8.0
 
 
 def get_collection_service() -> CollectionService:
@@ -292,11 +296,17 @@ def _preflight_collection_sessions(dataset_names: list[str]) -> None:
     required = ["sycm"]
     if "cps_overviews" in selected:
         required.append("cps")
+    deadline = time.monotonic() + COLLECTION_PREFLIGHT_TIMEOUT_SECONDS
     for platform_code in required:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeSessionUnavailable(
+                "采集浏览器会话预检查超过 20 秒，请确认页面已登录且网络可用后重试。"
+            )
         probe = open_browser_platform_session(
             settings.tmall_browser_port,
             platform_code,
-            timeout=8,
+            timeout=min(COLLECTION_PLATFORM_PROBE_TIMEOUT_SECONDS, remaining),
         )
         if not probe.authenticated:
             raise RuntimeSessionUnavailable(

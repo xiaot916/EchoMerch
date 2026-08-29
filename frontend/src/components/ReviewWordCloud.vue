@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
-import * as echarts from "echarts"
+import { TooltipComponent } from "echarts/components"
+import { init, use } from "echarts/core"
+import type { ECharts } from "echarts/core"
+import { CanvasRenderer } from "echarts/renderers"
 import "echarts-wordcloud"
+
+use([TooltipComponent, CanvasRenderer])
 
 const props = withDefaults(defineProps<{
   items: Array<{ name: string; count: number }>
@@ -15,7 +20,7 @@ const emit = defineEmits<{
 }>()
 
 const container = ref<HTMLDivElement>()
-let chart: echarts.ECharts | undefined
+let chart: ECharts | undefined
 let observer: ResizeObserver | undefined
 
 const palette = computed(() => props.tone === "competitor"
@@ -24,7 +29,7 @@ const palette = computed(() => props.tone === "competitor"
 
 function renderChart(): void {
   if (!container.value) return
-  chart ??= echarts.init(container.value)
+  chart ??= init(container.value)
   const values = props.items.map((item) => item.count)
   const min = Math.min(...values, 1)
   const max = Math.max(...values, 1)

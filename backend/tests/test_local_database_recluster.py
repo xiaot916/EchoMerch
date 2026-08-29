@@ -1,8 +1,37 @@
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from app.core.local_database import LocalDatabase
 from app.modules.imports.crawl_run_store import CrawlRunStore
+
+
+def test_initialize_schema_uses_version_gate_after_process_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = (tmp_path / "schema-version.sqlite3").resolve()
+    calls = 0
+    original = LocalDatabase._ensure_schema
+
+    def counted(self: LocalDatabase, conn: sqlite3.Connection) -> None:
+        nonlocal calls
+        calls += 1
+        original(self, conn)
+
+    monkeypatch.setattr(LocalDatabase, "_ensure_schema", counted)
+    LocalDatabase(database_path).initialize_schema()
+    assert calls == 1
+
+    # Simulate a fresh process: the on-disk schema version is authoritative,
+    # while the in-process path cache is deliberately cleared.
+    LocalDatabase._initialized_paths.discard(database_path)
+    LocalDatabase(database_path).initialize_schema()
+    assert calls == 1
+
+    LocalDatabase(database_path).initialize_schema(force=True)
+    assert calls == 2
 
 
 def test_recluster_daily_fact_table_restores_chronological_row_order(tmp_path: Path) -> None:

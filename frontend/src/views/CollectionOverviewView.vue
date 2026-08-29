@@ -37,6 +37,7 @@ const scheduleEnabled = ref(false)
 const scheduleTime = ref("07:30")
 const scheduleSource = ref("drissionpage")
 let pollTimer: number | undefined
+let postRunRefreshTimer: number | undefined
 let healthAbortController: AbortController | undefined
 
 const canManage = computed(() => can("data.manage"))
@@ -68,6 +69,7 @@ function syncSchedule(): void {
 }
 
 async function load(day = selectedDay.value): Promise<void> {
+  const wasRunning = running.value
   loading.value = true
   error.value = ""
   healthAbortController?.abort()
@@ -87,6 +89,16 @@ async function load(day = selectedDay.value): Promise<void> {
     selectedDay.value = overview.value.target_day
     syncSchedule()
     syncPolling()
+    // A worker can finish between two polls. Confirm the final coverage once
+    // shortly after the running flag drops so the UI does not leave a stale
+    // partial/failed state visible until the next manual refresh.
+    if (wasRunning && !running.value) {
+      if (postRunRefreshTimer !== undefined) window.clearTimeout(postRunRefreshTimer)
+      postRunRefreshTimer = window.setTimeout(() => {
+        postRunRefreshTimer = undefined
+        if (document.visibilityState !== "hidden") void load()
+      }, 1200)
+    }
   } catch (requestError) {
     error.value = requestError instanceof Error ? requestError.message : "采集数据状态暂不可用"
   } finally {
@@ -192,11 +204,17 @@ function syncPolling(): void {
   if (!running.value || document.visibilityState === "hidden") return
   pollTimer = window.setInterval(() => {
     if (document.visibilityState !== "hidden" && !loading.value) void load()
-  }, 4000)
+  }, 2000)
 }
 
 function handleVisibilityChange(): void {
-  if (document.visibilityState === "hidden") stopPolling()
+  if (document.visibilityState === "hidden") {
+    stopPolling()
+    if (postRunRefreshTimer !== undefined) {
+      window.clearTimeout(postRunRefreshTimer)
+      postRunRefreshTimer = undefined
+    }
+  }
   else syncPolling()
 }
 
@@ -252,6 +270,10 @@ onMounted(() => {
 onUnmounted(() => {
   document.removeEventListener("visibilitychange", handleVisibilityChange)
   stopPolling()
+  if (postRunRefreshTimer !== undefined) {
+    window.clearTimeout(postRunRefreshTimer)
+    postRunRefreshTimer = undefined
+  }
   healthAbortController?.abort()
 })
 </script>
