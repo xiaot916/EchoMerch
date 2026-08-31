@@ -40,6 +40,7 @@ import type {
   AskListResponse,
   AskSummary,
   AIAnalysisResponse,
+  AIPageProfile,
   AIConfiguration,
   AIConnectionTest,
   AIConversationDetail,
@@ -88,6 +89,10 @@ function normalizeAnalysis(analysis: NonNullable<DashboardResponse["analysis"]>)
       repeat_customer_paid_amount: numeric(analysis.customer.repeat_customer_paid_amount),
       repeat_rate: percent(analysis.customer.repeat_rate),
       no_purchase_conversion_rate: percent(analysis.customer.no_purchase_conversion_rate),
+      derived_metrics: (analysis.customer.derived_metrics ?? []).map((item) => ({
+        ...item,
+        value: optionalNumeric(item.value),
+      })),
       segments: (analysis.customer.segments ?? []).map((item) => ({
         ...item,
         conversion_rate: percent(item.conversion_rate),
@@ -98,8 +103,10 @@ function normalizeAnalysis(analysis: NonNullable<DashboardResponse["analysis"]>)
       })),
       daily_metrics: (analysis.customer.daily_metrics ?? []).map((item) => ({
         ...item,
-        new_paid_amount: numeric(item.new_paid_amount),
-        repeat_paid_amount: numeric(item.repeat_paid_amount),
+        total_paid_amount: numeric(item.total_paid_amount),
+        first_purchase_paid_amount: optionalNumeric(item.first_purchase_paid_amount),
+        new_paid_amount: optionalNumeric(item.new_paid_amount),
+        repeat_paid_amount: optionalNumeric(item.repeat_paid_amount),
       })),
     },
     member: {
@@ -392,11 +399,16 @@ export async function analyzeWithAI(request: {
   store_id?: number | null
   start_date?: string | null
   end_date?: string | null
-  domain?: "auto" | "overview" | "traffic" | "promotion" | "market" | "product" | "customer" | "customer-service" | "content" | "live" | "campaign" | "reviews"
+  domain?: AIPageProfile["domain"]
+  page_key?: string | null
   page_context?: Record<string, unknown>
   use_model?: boolean
 }): Promise<AIAnalysisResponse> {
   return apiPost<AIAnalysisResponse>("/api/v1/ai/analyze", request)
+}
+
+export async function fetchAIPageProfiles(signal?: AbortSignal): Promise<AIPageProfile[]> {
+  return apiGet<AIPageProfile[]>("/api/v1/ai/page-profiles", signal)
 }
 
 export type AIStreamEvent = {

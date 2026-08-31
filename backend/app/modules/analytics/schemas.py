@@ -397,6 +397,17 @@ class BusinessInsight(BaseModel):
     action: str | None = None
 
 
+class DecisionMetric(BaseModel):
+    id: str
+    label: str
+    value: Decimal | int | None = None
+    unit: Literal["currency", "count", "percent", "ratio"] = "count"
+    formula: str
+    source_metric_ids: list[str] = Field(default_factory=list)
+    status: Literal["available", "unavailable", "inconsistent"] = "available"
+    note: str = ""
+
+
 class SummaryMetric(BaseModel):
     paid_amount: Decimal
     visitors: int
@@ -437,6 +448,8 @@ class CustomerAnalysis(BaseModel):
     no_purchase_returners: int = 0
     no_purchase_buyers: int = 0
     no_purchase_conversion_rate: Decimal = Decimal("0")
+    derived_metrics: list[DecisionMetric] = Field(default_factory=list)
+    quality_warnings: list[str] = Field(default_factory=list)
     segments: list["CustomerSegmentMetric"] = Field(default_factory=list)
     daily_metrics: list["CustomerDailyMetric"] = Field(default_factory=list)
 
@@ -455,14 +468,18 @@ class CustomerSegmentMetric(BaseModel):
 
 class CustomerDailyMetric(BaseModel):
     stat_date: date
+    total_paid_buyers: int = 0
+    total_paid_amount: Decimal = Decimal("0")
+    first_purchase_paid_buyers: int | None = None
+    first_purchase_paid_amount: Decimal | None = None
     new_visitors: int = 0
     new_paid_buyers: int = 0
-    new_paid_amount: Decimal = Decimal("0")
+    new_paid_amount: Decimal | None = None
     no_purchase_returners: int = 0
     no_purchase_buyers: int = 0
     repeat_returners: int = 0
     repeat_buyers: int = 0
-    repeat_paid_amount: Decimal = Decimal("0")
+    repeat_paid_amount: Decimal | None = None
 
 
 class MemberAnalysis(BaseModel):

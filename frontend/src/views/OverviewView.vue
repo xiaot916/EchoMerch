@@ -5,11 +5,12 @@ import { Activity, ArrowDownRight, ArrowUpRight, CircleDollarSign, Gauge, Megaph
 import { fetchAnalyticsProducts, fetchFlashSaleAnalysis, fetchStores } from "@/api"
 import BusinessChart from "@/components/BusinessChart.vue"
 import EmptyState from "@/components/EmptyState.vue"
+import SalesGrowthBridge from "@/components/SalesGrowthBridge.vue"
 import { useDashboard } from "@/composables/useDashboard"
 import { compactRange, currency, number, ratio, shortDate } from "@/lib/format"
 import type { FlashSaleAnalysisResponse, ProductMetric } from "@/types"
 
-const { dashboard } = useDashboard()
+const { dashboard, currentStoreId } = useDashboard()
 const products = ref<ProductMetric[]>([])
 const flashSale = ref<FlashSaleAnalysisResponse>()
 const supportingLoading = ref(false)
@@ -154,7 +155,7 @@ async function loadSupportingData(): Promise<void> {
   const end = dashboard.value.range_end
   try {
     const stores = await fetchStores()
-    const storeId = stores[0]?.store_id
+    const storeId = currentStoreId.value ?? stores[0]?.store_id
     const [productResult, flashResult] = await Promise.allSettled([
       fetchAnalyticsProducts(start, end, storeId),
       fetchFlashSaleAnalysis(start, end, storeId),
@@ -280,17 +281,18 @@ const spendTrendOption = computed(() => {
   }
 })
 
-const businessDrivers = computed(() => {
-  if (!summary.value || !comparison.value) return []
-  return [
-    { label: "访客数", value: number(summary.value.visitors), change: comparison.value.visitors.change_percent, note: "流量规模" },
-    { label: "支付买家", value: number(summary.value.buyers), change: comparison.value.buyers.change_percent, note: "成交人数" },
-    { label: "支付转化率", value: ratio(summary.value.conversion_rate), change: comparison.value.conversion_rate.change_percent, note: "买家 / 访客" },
-    { label: "支付客单价", value: currency(summary.value.customer_unit_price), change: null, note: "金额 / 买家" },
-    { label: "全量推广花费", value: currency(summary.value.promotion_plan_spend), change: null, note: "推广计划全场景" },
-    { label: "推广费比", value: ratio(summary.value.promotion_fee_ratio), change: null, note: "花费 / 全店支付" },
-  ]
-})
+const currentSalesBridgeInput = computed(() => ({
+  paidAmount: summary.value?.paid_amount ?? 0,
+  visitors: summary.value?.visitors ?? 0,
+  buyers: summary.value?.buyers ?? 0,
+  conversionRate: summary.value?.conversion_rate ?? 0,
+}))
+const previousSalesBridgeInput = computed(() => ({
+  paidAmount: comparison.value?.paid_amount.previous ?? 0,
+  visitors: comparison.value?.visitors.previous ?? 0,
+  buyers: comparison.value?.buyers.previous ?? 0,
+  conversionRate: comparison.value?.conversion_rate.previous ?? 0,
+}))
 </script>
 
 <template>
@@ -303,7 +305,7 @@ const businessDrivers = computed(() => {
     <section class="store-kpi-grid store-kpi-grid-primary" aria-label="全店核心经营指标"><article v-for="item in coreMetrics.slice(0, 4)" :key="item.label" class="store-kpi" :class="`store-kpi-${item.tone}`"><div class="store-kpi-label"><span>{{ item.label }}</span><component :is="item.icon" :size="17" /></div><strong>{{ item.value }}</strong><small>{{ item.detail }}</small><em v-if="item.change !== null" :class="changeClass(item.change)"><ArrowUpRight v-if="item.change && item.change > 0" :size="13" /><ArrowDownRight v-else-if="item.change && item.change < 0" :size="13" />{{ changeLabel(item.change) }} 环比</em></article></section>
 
     <section class="store-kpi-grid store-kpi-grid-secondary" aria-label="全店补充经营指标"><article v-for="item in coreMetrics.slice(4)" :key="item.label" class="store-kpi" :class="`store-kpi-${item.tone}`"><div class="store-kpi-label"><span>{{ item.label }}</span><component :is="item.icon" :size="17" /></div><strong>{{ item.value }}</strong><small>{{ item.detail }}</small><em v-if="item.change !== null" :class="changeClass(item.change)"><ArrowUpRight v-if="item.change && item.change > 0" :size="13" /><ArrowDownRight v-else-if="item.change && item.change < 0" :size="13" />{{ changeLabel(item.change) }} 环比</em></article></section>
-    <section class="store-overview-grid"><article class="store-overview-panel store-result-panel"><header><div><h2>支付与退款</h2></div><span>净支付 {{ currency(summary.net_paid_amount) }}</span></header><BusinessChart v-if="dashboard.daily_metrics.length" :option="resultTrendOption" ariaLabel="全店支付金额退款金额趋势" :height="320" /><EmptyState v-else title="暂无支付数据" detail="当前区间没有店铺日报。" /></article><article class="store-overview-panel"><header><div><h2>流量与成交</h2></div><Gauge :size="18" /></header><div class="store-driver-list"><div v-for="item in businessDrivers" :key="item.label"><div><strong>{{ item.label }}</strong><small>{{ item.note }}</small></div><div><strong>{{ item.value }}</strong><em v-if="item.change !== null" :class="changeClass(item.change)">{{ changeLabel(item.change) }}</em><small v-else>当前区间</small></div></div></div></article></section>
+    <section class="store-overview-grid"><article class="store-overview-panel store-result-panel"><header><div><h2>支付与退款</h2></div><span>净支付 {{ currency(summary.net_paid_amount) }}</span></header><BusinessChart v-if="dashboard.daily_metrics.length" :option="resultTrendOption" ariaLabel="全店支付金额退款金额趋势" :height="320" /><EmptyState v-else title="暂无支付数据" detail="当前区间没有店铺日报。" /></article><article class="store-overview-panel"><header><div><h2>支付增长贡献</h2></div><Gauge :size="18" /></header><SalesGrowthBridge :current="currentSalesBridgeInput" :previous="previousSalesBridgeInput" :comparable="coverageComplete" :height="248" /></article></section>
 
     <section class="store-overview-grid store-overview-grid-lower"><article class="store-overview-panel"><header><div><h2>推广花费与归因成交</h2></div><span>{{ number(promotionCoverage?.covered_days || 0) }} 天</span></header><BusinessChart v-if="dashboard.promotion_daily_metrics.some((item) => item.spend > 0)" :option="spendTrendOption" ariaLabel="全量推广花费和推广归因成交趋势" :height="300" /><EmptyState v-else title="暂无推广数据" detail="当前区间没有推广日报。" /></article><article class="store-overview-panel store-efficiency-panel"><header><div><h2>推广与退款</h2></div><Target :size="18" /></header><div class="store-efficiency-main"><span>推广费比</span><strong>{{ ratio(summary.promotion_fee_ratio) }}</strong><small>全量推广花费 / 支付金额</small></div><div class="store-efficiency-pairs"><div><span>推广 ROI</span><strong>{{ summary.promotion_roi.toFixed(2) }}x</strong></div><div><span>归因成交</span><strong>{{ currency(summary.promotion_attributed_paid_amount) }}</strong></div><div><span>退款率</span><strong>{{ ratio(refundRate) }}</strong></div><div><span>净支付率</span><strong>{{ ratio(summary.paid_amount ? summary.net_paid_amount / summary.paid_amount * 100 : 0) }}</strong></div></div><p>推广费比 = 全量推广花费 / 支付金额；推广 ROI = 归因成交 / 全量推广花费。</p></article></section>
 

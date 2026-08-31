@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue"
-import { ArrowLeft, ArrowRight, BarChart3, CircleDollarSign, Coins, LoaderCircle, MousePointerClick, Scale } from "lucide-vue-next"
+import { ArrowLeft, ArrowRight, BarChart3, CircleDollarSign, Coins, LoaderCircle, MousePointerClick, Scale, TriangleAlert } from "lucide-vue-next"
 
 import BusinessChart from "@/components/BusinessChart.vue"
 import EmptyState from "@/components/EmptyState.vue"
@@ -21,6 +21,8 @@ const dailyPageEnd = computed(() => Math.min(dailyPage.value * dailyPageSize.val
 watch(dailyPageSize, () => { dailyPage.value = 1 })
 watch(dailyPageCount, (value) => { if (dailyPage.value > value) dailyPage.value = value })
 watch(() => [dashboard.value?.range_start, dashboard.value?.range_end], () => { dailyPage.value = 1 })
+function clickPaymentRate(clickVisitors: number, paidOrders: number): number | null { return clickVisitors ? paidOrders / clickVisitors * 100 : null }
+function paymentCostRate(paidAmount: number, paymentExpense: number): number | null { return paidAmount ? paymentExpense / paidAmount * 100 : null }
 
 const trendOption = computed(() => ({
   color: ["#16845b", "#5b8def", "#e2a447"],
@@ -44,6 +46,8 @@ const trendOption = computed(() => ({
       <span class="data-definition-badge"><Scale :size="15" /> 付款 / 结算双口径</span>
     </section>
 
+    <section class="cps-data-boundary"><TriangleAlert :size="16" /><div><strong>当前 CPS 源只能下钻到统计日</strong><span>现有表没有达人、合作方、商品与退款扣除明细，所以本页保留付款/结算双口径和日级效率，不生成虚假的达人排行；补齐明细后再启用达人集中度与商品净贡献。</span></div></section>
+
     <section class="metrics-grid module-metrics">
       <MetricCard label="CPS 付款金额" :value="currency(cps.paid_amount)" :detail="`${number(cps.paid_order_count)} 笔付款 · ${number(cps.click_visitors)} 位点击访客`" :icon="CircleDollarSign" tone="teal" scope="区间累计" />
       <MetricCard label="CPS 结算金额" :value="currency(cps.settlement_amount)" :detail="`结算率 ${ratio(cps.settlement_rate)} · ${number(cps.settlement_order_count)} 笔结算`" :icon="Coins" tone="blue" scope="区间累计" definition="结算金额可能滞后于付款金额，不能与当期付款直接做即时利润判断。" />
@@ -56,8 +60,12 @@ const trendOption = computed(() => ({
       <article class="panel"><div class="panel-heading"><div><p>付款与结算</p><h2>转化与结算差额</h2></div><Scale :size="18" /></div><div class="marketing-reading-list"><div><span>点击到付款</span><strong>{{ ratio(cps.click_visitors ? cps.paid_order_count / cps.click_visitors * 100 : 0) }}</strong><small>付款笔数 / 点击人数，仅作规模效率参考</small></div><div><span>付款到结算差额</span><strong>{{ currency(cps.paid_amount - cps.settlement_amount) }}</strong><small>可能包含时间滞后、退款和结算口径差异</small></div><div><span>结算支出</span><strong>{{ currency(cps.settlement_expense) }}</strong><small>结算支出费用与结算营销服务费</small></div></div></article>
     </section>
 
-    <section class="panel marketing-daily-panel"><div class="panel-heading"><div><p>日级核对</p><h2>CPS 原始日报明细</h2></div><span class="panel-action">{{ daily.length }} 个统计日</span></div><div class="marketing-daily-table cps-daily-table"><div class="marketing-daily-row marketing-daily-head"><span>日期</span><span>点击人数</span><span>付款金额</span><span>付款笔数</span><span>结算金额</span><span>渠道支出</span></div><div v-for="item in pagedDaily" :key="item.stat_date" class="marketing-daily-row"><span>{{ item.stat_date }}</span><span>{{ number(item.click_visitors) }}</span><span>{{ currency(item.paid_amount) }}</span><span>{{ number(item.paid_order_count) }}</span><span>{{ currency(item.settlement_amount) }}</span><span>{{ currency(item.payment_expense + item.settlement_expense) }}</span></div></div><footer class="daily-pagination"><div><span>显示 {{ number(dailyPageStart) }}–{{ number(dailyPageEnd) }} / {{ number(orderedDaily.length) }} 天</span><label>每页<select v-model.number="dailyPageSize"><option :value="10">10</option><option :value="20">20</option><option :value="30">30</option></select></label></div><div><button type="button" :disabled="dailyPage <= 1" @click="dailyPage -= 1"><ArrowLeft :size="14" />上一页</button><span>第 {{ dailyPage }} / {{ dailyPageCount }} 页</span><button type="button" :disabled="dailyPage >= dailyPageCount" @click="dailyPage += 1">下一页<ArrowRight :size="14" /></button></div></footer><p class="panel-footnote">付款、结算是平台不同阶段的事实指标；渠道支出只按 CPS 字段汇总，不扩展为用户未提供的商品成本或全店利润模型。</p></section>
+    <section class="panel marketing-daily-panel"><div class="panel-heading"><div><p>日级核对</p><h2>CPS 付款、费用与结算效率</h2></div><span class="panel-action">{{ daily.length }} 个统计日</span></div><div class="marketing-daily-table cps-daily-table"><div class="marketing-daily-row marketing-daily-head"><span>日期</span><span>点击人数</span><span>付款金额</span><span>付款笔数</span><span>点击付款率</span><span>付款支出</span><span>付款成本率</span><span>结算金额</span><span>付款结算差额</span></div><div v-for="item in pagedDaily" :key="item.stat_date" class="marketing-daily-row"><span>{{ item.stat_date }}</span><span>{{ number(item.click_visitors) }}</span><b>{{ currency(item.paid_amount) }}</b><span>{{ number(item.paid_order_count) }}</span><em>{{ clickPaymentRate(item.click_visitors, item.paid_order_count) == null ? '--' : ratio(clickPaymentRate(item.click_visitors, item.paid_order_count) || 0) }}</em><span>{{ currency(item.payment_expense) }}</span><em>{{ paymentCostRate(item.paid_amount, item.payment_expense) == null ? '--' : ratio(paymentCostRate(item.paid_amount, item.payment_expense) || 0) }}</em><span>{{ currency(item.settlement_amount) }}</span><span>{{ currency(item.paid_amount - item.settlement_amount) }}</span></div></div><footer class="daily-pagination"><div><span>显示 {{ number(dailyPageStart) }}–{{ number(dailyPageEnd) }} / {{ number(orderedDaily.length) }} 天</span><label>每页<select v-model.number="dailyPageSize"><option :value="10">10</option><option :value="20">20</option><option :value="30">30</option></select></label></div><div><button type="button" :disabled="dailyPage <= 1" @click="dailyPage -= 1"><ArrowLeft :size="14" />上一页</button><span>第 {{ dailyPage }} / {{ dailyPageCount }} 页</span><button type="button" :disabled="dailyPage >= dailyPageCount" @click="dailyPage += 1">下一页<ArrowRight :size="14" /></button></div></footer><p class="panel-footnote">付款成本率 = 付款阶段渠道支出 ÷ CPS 付款金额。付款与结算可能跨周期，差额仅用于核对时间滞后和退款/结算口径，不直接解释为利润或损失。</p></section>
   </template>
   <section v-else-if="loading" class="loading-panel"><LoaderCircle :size="26" class="spinning" /><span>正在读取 CPS 分析</span></section>
   <EmptyState v-else title="暂无 CPS 分析数据" detail="当前日期范围没有 CPS 日报记录。" :icon="Scale" />
 </template>
+
+<style scoped>
+.cps-data-boundary { display: flex; align-items: flex-start; gap: 9px; border: 1px solid #e7ddbd; border-radius: 5px; padding: 10px 12px; color: #8b6b2d; background: #fffaf1; }.cps-data-boundary svg { flex: 0 0 auto; margin-top: 1px; }.cps-data-boundary div { display: grid; gap: 3px; }.cps-data-boundary strong { color: #765a24; font-size: 10px; }.cps-data-boundary span { color: #8e7950; font-size: 9px; line-height: 1.5; }.cps-daily-table .marketing-daily-row { min-width: 1120px; grid-template-columns: 1fr repeat(8, .9fr); }.cps-daily-table .marketing-daily-row b { color: #40564a; }.cps-daily-table .marketing-daily-row em { color: #167b55; font-style: normal; font-weight: 700; }
+</style>

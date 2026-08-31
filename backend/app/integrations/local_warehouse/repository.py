@@ -66,6 +66,7 @@ from app.modules.analytics.schemas import (
     UtryRepurchaseSnapshot,
     UtrySampleSummary,
 )
+from app.modules.analytics.derived_metrics import CUSTOMER_DERIVED_METRICS, derive_metrics
 from app.warehouse.store import WarehouseDataNotAvailable, WarehouseStore
 
 
@@ -1408,6 +1409,49 @@ class LocalWarehouseAnalyticsRepository:
             start_date,
             end_date,
         )
+        overview_total_rows = self._rows(
+            '''select
+                sum(cast(coalesce(o."支付金额", '0') as real)) as "支付金额",
+                sum(cast(coalesce(o."支付买家数", '0') as real)) as "支付买家数"
+               from store_daily_customer_overviews c
+               left join store_daily_overviews o on o."店铺ID" = c."店铺ID" and o."业务日期" = c."业务日期"
+               where c."店铺ID" = ? and c."业务日期" between ? and ?
+                 and coalesce(
+                   c."客户新访", c."新访成交", c."未购客户回访", c."回访成交",
+                   c."已购客户回访", c."老客复购", c."新访支付金额占比",
+                   c."未购回访支付金额占比", c."已购回访支付金额占比"
+                 ) is not null''',
+            self._store_id, start_date.isoformat(), end_date.isoformat(),
+        )
+        overview_totals = overview_total_rows[0] if overview_total_rows else {}
+        source_coverage_rows = self._rows(
+            '''select
+                count(*) as customer_days,
+                min(c."业务日期") as first_customer_date,
+                max(c."业务日期") as latest_customer_date,
+                count(case when o."支付买家数" is not null and trim(cast(o."支付买家数" as text)) <> '' then 1 end) as total_buyer_days,
+                count(case when o."支付金额" is not null and trim(cast(o."支付金额" as text)) <> '' then 1 end) as total_amount_days,
+                count(case when c."新访成交" is not null and trim(cast(c."新访成交" as text)) <> '' then 1 end) as new_visit_buyer_days,
+                count(case when c."回访成交" is not null and trim(cast(c."回访成交" as text)) <> '' then 1 end) as no_purchase_buyer_days,
+                count(case when c."老客复购" is not null and trim(cast(c."老客复购" as text)) <> '' then 1 end) as repeat_buyer_days,
+                count(case when o."支付金额" is not null and trim(cast(o."支付金额" as text)) <> '' and c."新访支付金额占比" is not null and trim(cast(c."新访支付金额占比" as text)) <> '' then 1 end) as new_visit_amount_days,
+                count(case when o."支付金额" is not null and trim(cast(o."支付金额" as text)) <> '' and c."未购回访支付金额占比" is not null and trim(cast(c."未购回访支付金额占比" as text)) <> '' then 1 end) as no_purchase_amount_days,
+                count(case when o."支付金额" is not null and trim(cast(o."支付金额" as text)) <> '' and c."已购回访支付金额占比" is not null and trim(cast(c."已购回访支付金额占比" as text)) <> '' then 1 end) as repeat_amount_days
+               from store_daily_customer_overviews c
+               left join store_daily_overviews o on o."店铺ID" = c."店铺ID" and o."业务日期" = c."业务日期"
+               where c."店铺ID" = ? and c."业务日期" between ? and ?
+                 and coalesce(
+                   c."客户新访", c."新访成交", c."未购客户回访", c."回访成交",
+                   c."已购客户回访", c."老客复购", c."新访支付金额占比",
+                   c."未购回访支付金额占比", c."已购回访支付金额占比"
+                 ) is not null''',
+            self._store_id, start_date.isoformat(), end_date.isoformat(),
+        )
+        source_coverage = source_coverage_rows[0] if source_coverage_rows else {}
+        customer_days = _integer(source_coverage.get("customer_days"))
+
+        def source_complete(key: str) -> bool:
+            return customer_days > 0 and _integer(source_coverage.get(key)) == customer_days
         amount_rows = self._rows(
             '''select
                 sum(cast(coalesce(o."支付金额", '0') as real) * cast(coalesce(c."新访支付金额占比", '0') as real)) as new_amount,
@@ -1433,6 +1477,44 @@ class LocalWarehouseAnalyticsRepository:
         no_purchase_buyers = _integer(row.get("回访成交"))
         repeat_returners = _integer(row.get("已购客户回访"))
         no_purchase_amount = _decimal(amounts.get("no_purchase_amount"))
+        new_visit_amount = _decimal(amounts.get("new_amount"))
+        repeat_amount = _decimal(amounts.get("repeat_amount"))
+        total_paid_amount = _decimal(overview_totals.get("支付金额"))
+        total_paid_buyers = _integer(overview_totals.get("支付买家数"))
+        derived_metrics = derive_metrics(
+            {
+                "total_paid_buyers": total_paid_buyers if source_complete("total_buyer_days") else None,
+                "total_paid_amount": total_paid_amount if source_complete("total_amount_days") else None,
+                "new_visit_paid_buyers": new_paid if source_complete("new_visit_buyer_days") else None,
+                "new_visit_paid_amount": new_visit_amount if source_complete("new_visit_amount_days") else None,
+                "no_purchase_paid_buyers": no_purchase_buyers if source_complete("no_purchase_buyer_days") else None,
+                "no_purchase_paid_amount": no_purchase_amount if source_complete("no_purchase_amount_days") else None,
+                "repeat_paid_buyers": repeat_customers if source_complete("repeat_buyer_days") else None,
+                "repeat_paid_amount": repeat_amount if source_complete("repeat_amount_days") else None,
+            },
+            CUSTOMER_DERIVED_METRICS,
+        )
+        quality_warnings: list[str] = []
+        incomplete_sources = [
+            label
+            for key, label in (
+                ("total_buyer_days", "总支付买家数"),
+                ("total_amount_days", "总支付金额"),
+                ("repeat_buyer_days", "老客复购人数"),
+                ("repeat_amount_days", "老客复购金额占比"),
+            )
+            if customer_days and not source_complete(key)
+        ]
+        if incomplete_sources:
+            quality_warnings.append("以下指标未覆盖全部客户有效日，相关派生结果已停止计算：" + "、".join(incomplete_sources))
+        latest_customer_date = source_coverage.get("latest_customer_date")
+        if latest_customer_date and str(latest_customer_date) < end_date.isoformat():
+            quality_warnings.append(f"客户有效指标仅到 {latest_customer_date}，晚于该日的店铺总盘数据未参与新老客推导。")
+        if repeat_customers > 0 and _decimal(latest.get("老客复购率")) == 0:
+            quality_warnings.append("平台老客复购率为0，但区间内存在老客复购人数；复购率字段暂不用于经营结论。")
+        inconsistent = [item.label for item in derived_metrics if item.status == "inconsistent"]
+        if inconsistent:
+            quality_warnings.append("以下派生指标依赖字段口径不一致：" + "、".join(inconsistent))
         segments = [
             CustomerSegmentMetric(
                 key="new",
@@ -1440,9 +1522,9 @@ class LocalWarehouseAnalyticsRepository:
                 reached=new_customers,
                 buyers=new_paid,
                 conversion_rate=_percent_ratio(new_paid, new_customers),
-                paid_amount=_decimal(amounts.get("new_amount")),
+                paid_amount=new_visit_amount,
                 unit_price=(
-                    _decimal(amounts.get("new_amount")) / Decimal(new_paid)
+                    new_visit_amount / Decimal(new_paid)
                     if new_paid else Decimal("0")
                 ),
                 member_rate=(
@@ -1477,9 +1559,9 @@ class LocalWarehouseAnalyticsRepository:
                 reached=repeat_returners,
                 buyers=repeat_customers,
                 conversion_rate=_percent_ratio(repeat_customers, repeat_returners),
-                paid_amount=_decimal(amounts.get("repeat_amount")),
+                paid_amount=repeat_amount,
                 unit_price=(
-                    _decimal(amounts.get("repeat_amount")) / Decimal(repeat_customers)
+                    repeat_amount / Decimal(repeat_customers)
                     if repeat_customers else Decimal("0")
                 ),
                 member_rate=(
@@ -1494,11 +1576,12 @@ class LocalWarehouseAnalyticsRepository:
         ]
         daily_rows = self._rows(
             '''select c."业务日期" as business_day,
+                o."支付买家数" as total_paid_buyers, o."支付金额" as total_paid_amount,
                 c."客户新访" as new_visitors, c."新访成交" as new_paid_buyers,
                 c."未购客户回访" as no_purchase_returners, c."回访成交" as no_purchase_buyers,
                 c."已购客户回访" as repeat_returners, c."老客复购" as repeat_buyers,
-                cast(coalesce(o."支付金额", '0') as real) * cast(coalesce(c."新访支付金额占比", '0') as real) as new_paid_amount,
-                cast(coalesce(o."支付金额", '0') as real) * cast(coalesce(c."已购回访支付金额占比", '0') as real) as repeat_paid_amount
+                cast(o."支付金额" as real) * cast(c."新访支付金额占比" as real) as new_paid_amount,
+                cast(o."支付金额" as real) * cast(c."已购回访支付金额占比" as real) as repeat_paid_amount
                from store_daily_customer_overviews c
                left join store_daily_overviews o on o."店铺ID" = c."店铺ID" and o."业务日期" = c."业务日期"
                where c."店铺ID" = ? and c."业务日期" between ? and ?
@@ -1522,26 +1605,44 @@ class LocalWarehouseAnalyticsRepository:
             ),
             new_customers=new_customers,
             new_customer_paid_buyers=new_paid,
-            new_customer_paid_amount=_decimal(amounts.get("new_amount")),
+            new_customer_paid_amount=new_visit_amount,
             new_customer_conversion_rate=_percent_ratio(new_paid, new_customers),
             repeat_customers=repeat_customers,
-            repeat_customer_paid_amount=_decimal(amounts.get("repeat_amount")),
+            repeat_customer_paid_amount=repeat_amount,
             repeat_rate=_decimal(latest.get("老客复购率")),
             no_purchase_returners=no_purchase_returners,
             no_purchase_buyers=no_purchase_buyers,
             no_purchase_conversion_rate=_percent_ratio(no_purchase_buyers, no_purchase_returners),
+            derived_metrics=derived_metrics,
+            quality_warnings=quality_warnings,
             segments=segments,
             daily_metrics=[
                 CustomerDailyMetric(
                     stat_date=date.fromisoformat(str(item["business_day"])),
+                    total_paid_buyers=_integer(item["total_paid_buyers"]),
+                    total_paid_amount=_decimal(item["total_paid_amount"]),
+                    first_purchase_paid_buyers=(
+                        _integer(item["total_paid_buyers"]) - _integer(item["repeat_buyers"])
+                        if item["total_paid_buyers"] not in (None, "")
+                        and item["repeat_buyers"] not in (None, "")
+                        and _integer(item["total_paid_buyers"]) >= _integer(item["repeat_buyers"])
+                        else None
+                    ),
+                    first_purchase_paid_amount=(
+                        _decimal(item["total_paid_amount"]) - _decimal(item["repeat_paid_amount"])
+                        if item["total_paid_amount"] not in (None, "")
+                        and item["repeat_paid_amount"] not in (None, "")
+                        and _decimal(item["total_paid_amount"]) >= _decimal(item["repeat_paid_amount"])
+                        else None
+                    ),
                     new_visitors=_integer(item["new_visitors"]),
                     new_paid_buyers=_integer(item["new_paid_buyers"]),
-                    new_paid_amount=_decimal(item["new_paid_amount"]),
+                    new_paid_amount=_decimal(item["new_paid_amount"]) if item["new_paid_amount"] not in (None, "") else None,
                     no_purchase_returners=_integer(item["no_purchase_returners"]),
                     no_purchase_buyers=_integer(item["no_purchase_buyers"]),
                     repeat_returners=_integer(item["repeat_returners"]),
                     repeat_buyers=_integer(item["repeat_buyers"]),
-                    repeat_paid_amount=_decimal(item["repeat_paid_amount"]),
+                    repeat_paid_amount=_decimal(item["repeat_paid_amount"]) if item["repeat_paid_amount"] not in (None, "") else None,
                 )
                 for item in daily_rows
             ],

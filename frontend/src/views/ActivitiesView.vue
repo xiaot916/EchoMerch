@@ -19,6 +19,7 @@ import {
 } from "lucide-vue-next"
 
 import BusinessChart from "@/components/BusinessChart.vue"
+import ActivityComparisonWorkbench from "@/components/ActivityComparisonWorkbench.vue"
 import EmptyState from "@/components/EmptyState.vue"
 import MetricCard from "@/components/MetricCard.vue"
 import { fetchActivityCalendar, fetchDashboard, fetchStores } from "@/api"
@@ -36,6 +37,9 @@ const analysisError = ref("")
 const windows = ref<WindowData | null>(null)
 const stageMetric = ref<StageMetricKey>("paidAmount")
 const activitySelector = ref<HTMLElement>()
+const storeId = ref<number | null>(null)
+const activityYear = ref("")
+const activitySearch = ref("")
 let analysisRequestVersion = 0
 
 type StageKey = "before" | "during" | "after"
@@ -137,9 +141,11 @@ async function loadActivities(): Promise<void> {
   activityError.value = ""
   try {
     const store = (await fetchStores())[0]
-    if (!store) { activities.value = []; return }
-    const year = dashboard.value.range_start.slice(0, 4)
-    activities.value = await fetchActivityCalendar(store.store_id, `${year}-01-01`, `${year}-12-31`)
+    if (!store) { activities.value = []; storeId.value = null; return }
+    storeId.value = store.store_id
+    const currentYear = Number(dashboard.value.range_end.slice(0, 4))
+    activities.value = await fetchActivityCalendar(store.store_id, `${currentYear - 2}-01-01`, `${currentYear}-12-31`)
+    if (!activityYear.value) activityYear.value = String(currentYear)
     if (!selectedActivityId.value || !activities.value.some((item) => item.activity_id === selectedActivityId.value)) {
       const inRange = activities.value.filter((item) => activityStart(item) <= dashboard.value!.range_end && activityEnd(item) >= dashboard.value!.range_start)
       selectedActivityId.value = (inRange[inRange.length - 1] || activities.value[activities.value.length - 1])?.activity_id || ""
@@ -151,6 +157,16 @@ async function loadActivities(): Promise<void> {
 }
 
 const selectedActivity = computed(() => activities.value.find((item) => item.activity_id === selectedActivityId.value) || null)
+const activityYears = computed(() => {
+  const currentYear = Number(dashboard.value?.range_end.slice(0, 4) || new Date().getFullYear())
+  return [String(currentYear), String(currentYear - 1), String(currentYear - 2)]
+})
+const visibleActivities = computed(() => {
+  const keyword = activitySearch.value.trim().toLowerCase()
+  const yearStart = `${activityYear.value}-01-01`
+  const yearEnd = `${activityYear.value}-12-31`
+  return activities.value.filter((item) => (!activityYear.value || activityStart(item) <= yearEnd && activityEnd(item) >= yearStart) && (!keyword || item.activity_name.toLowerCase().includes(keyword)))
+})
 const rangeActivities = computed(() => activities.value.filter((item) => activityStart(item) <= (dashboard.value?.range_end || "") && activityEnd(item) >= (dashboard.value?.range_start || "")))
 const activityDays = computed(() => new Set(activities.value.flatMap((activity) => {
   const days: string[] = []
@@ -187,10 +203,9 @@ async function loadAnalysis(item: StoreActivityCalendarEvent | null): Promise<vo
   const start = activityStart(item); const end = activityEnd(item); const duration = dayCount(start, end)
   const beforeRange = { start: addDays(start, -duration), end: addDays(start, -1) }
   const duringRange = { start, end }; const afterRange = { start: addDays(end, 1), end: addDays(end, duration) }
-  const store = (await fetchStores())[0]
-  if (!store || requestVersion !== analysisRequestVersion) return
+  if (!storeId.value || requestVersion !== analysisRequestVersion) return
   analysisLoading.value = true; analysisError.value = ""; windows.value = null
-  const [before, during, after] = await Promise.all([fetchWindow(beforeRange, store.store_id, availableEnd), fetchWindow(duringRange, store.store_id, availableEnd), fetchWindow(afterRange, store.store_id, availableEnd)])
+  const [before, during, after] = await Promise.all([fetchWindow(beforeRange, storeId.value, availableEnd), fetchWindow(duringRange, storeId.value, availableEnd), fetchWindow(afterRange, storeId.value, availableEnd)])
   if (requestVersion !== analysisRequestVersion) return
   windows.value = { before, during, after, beforeRange, duringRange: clampEnd(duringRange, availableEnd) || duringRange, afterRange: clampEnd(afterRange, availableEnd) || afterRange, availableEnd }
   if (!before && !during && !after) analysisError.value = "该活动暂无可用经营数据"
@@ -342,24 +357,30 @@ const hasAnyAnalysis = computed(() => snapshots.value.some((item) => item.data))
     </section>
 
     <section class="metrics-grid module-metrics">
-      <MetricCard label="活动数量" :value="number(activities.length)" detail="全年活动记录" :icon="CalendarDays" tone="blue" scope="区间记录" />
+      <MetricCard label="活动数量" :value="number(activities.length)" detail="近三年活动记录" :icon="CalendarDays" tone="blue" scope="年度日历" />
       <MetricCard label="活动覆盖日" :value="number(activityRows.length)" detail="当前筛选区间内" :icon="Layers3" tone="teal" scope="区间记录" />
       <MetricCard label="活动日均支付" :value="activityRows.length ? currency(average(activityRows)) : '无活动日'" detail="活动覆盖日简单日均" :icon="CircleDollarSign" tone="amber" scope="观察指标" />
       <MetricCard label="非活动日均支付" :value="nonActivityRows.length ? currency(average(nonActivityRows)) : '无对照日'" detail="仅供时间相关性对照" :icon="TrendingUp" tone="coral" scope="观察指标" />
     </section>
 
     <section class="panel activity-selector-panel">
-      <div class="panel-heading"><div><p>活动日历入口</p><h2>选择活动开始复盘</h2></div><span class="panel-action">共 {{ activities.length }} 场</span></div>
+      <div class="panel-heading"><div><p>活动日历入口</p><h2>选择活动开始复盘</h2></div><span class="panel-action">共 {{ activities.length }} 场 · 当前 {{ visibleActivities.length }} 场</span></div>
+      <div class="activity-selector-toolbar">
+        <div class="activity-year-filter" role="group" aria-label="按年份筛选活动"><button v-for="year in activityYears" :key="year" type="button" :class="{ active: activityYear === year }" @click="activityYear = year">{{ year }}</button></div>
+        <label class="activity-search-field"><span>搜索活动</span><input v-model="activitySearch" type="search" placeholder="双11、618、超级88..." /></label>
+      </div>
       <section v-if="activityLoading" class="admin-loading-state"><LoaderCircle :size="22" class="spinning" /><span>正在读取活动日历</span></section>
-      <div v-else-if="activities.length" ref="activitySelector" class="activity-selector-list">
-        <button v-for="item in activities" :key="item.activity_id" type="button" class="activity-selector-item" :class="{ active: item.activity_id === selectedActivityId }" @click="selectedActivityId = item.activity_id">
+      <div v-else-if="visibleActivities.length" ref="activitySelector" class="activity-selector-list">
+        <button v-for="item in visibleActivities" :key="item.activity_id" type="button" class="activity-selector-item" :class="{ active: item.activity_id === selectedActivityId }" @click="selectedActivityId = item.activity_id">
           <span class="activity-selector-icon"><ActivityIcon :size="15" /></span>
           <span class="activity-selector-copy"><strong>{{ item.activity_name || '未命名活动' }}</strong><small>{{ displayDate(activityStart(item)) }} 至 {{ displayDate(activityEnd(item)) }} · {{ dayCount(activityStart(item), activityEnd(item)) }} 天</small></span>
           <span class="activity-selector-status">{{ activityTimeStatus(item) }}</span>
         </button>
       </div>
-      <EmptyState v-else :title="activityError ? '活动日历读取失败' : '当前范围暂无活动'" :detail="activityError || '没有活动日历记录。'" :icon="CalendarDays" />
+      <EmptyState v-else :title="activityError ? '活动日历读取失败' : '当前筛选暂无活动'" :detail="activityError || '调整年份或活动名称后重试。'" :icon="CalendarDays" />
     </section>
+
+    <ActivityComparisonWorkbench :activities="activities" :store-id="storeId" :primary-activity-id="selectedActivityId" :available-end="dashboard.range_end" />
 
     <section class="panel decision-wide-chart activity-overview-chart"><div class="panel-heading"><div><p>区间观察</p><h2>活动覆盖与每日支付金额</h2></div><span class="panel-action">橙色节点为活动覆盖日</span></div><BusinessChart :option="chartOption" ariaLabel="活动覆盖与支付金额时间轴" :height="340" /></section>
 

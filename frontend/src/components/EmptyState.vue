@@ -7,11 +7,16 @@ withDefaults(
     title: string
     detail: string
     icon?: Component
+    actionLabel?: string
   }>(),
   {
     icon: () => Inbox,
   },
 )
+
+defineEmits<{
+  action: []
+}>()
 </script>
 
 <template>
@@ -19,5 +24,6 @@ withDefaults(
     <component :is="icon" :size="22" />
     <strong>{{ title }}</strong>
     <span>{{ detail }}</span>
+    <button v-if="actionLabel" class="empty-state-action" type="button" @click="$emit('action')">{{ actionLabel }}</button>
   </div>
 </template>

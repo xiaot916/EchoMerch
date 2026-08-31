@@ -635,6 +635,56 @@ export interface DataCoverage {
   status: "complete" | "partial" | "empty"
 }
 
+export type AIDomain = "auto" | "overview" | "traffic" | "promotion" | "market" | "inventory" | "budget" | "planning" | "product" | "customer" | "customer-service" | "content" | "live" | "campaign" | "reviews"
+
+export interface AIPageProfile {
+  key: string
+  title: string
+  section: string
+  domain: AIDomain
+  primary_skill: string
+  goal: string
+  diagnostic_question: string
+  data_domains: string[]
+  datasets: string[]
+  recommended_questions: string[]
+  focus_dimensions: string[]
+  decision_lens: {
+    result: string
+    cause: string
+    affected: string
+    action: string
+    validation: string
+  }
+  quality_checks: string[]
+}
+
+export interface AIDiagnosisFinding {
+  level: "critical" | "warning" | "positive" | "info" | string
+  title: string
+  detail: string
+  metric_ids: string[]
+  evidence: string[]
+  impact: string
+  confidence: "high" | "medium" | "low"
+}
+
+export interface AIRecommendedAction {
+  priority: "P0" | "P1" | "P2" | string
+  title: string
+  detail: string
+  owner: string
+  validation: string
+  observation_window: string
+  expected_impact: string
+  object_type: string
+  object_id: string
+  problem: string
+  verify_metric: string
+  stop_condition: string
+  confidence: "high" | "medium" | "low"
+}
+
 export interface AIAnalysisResponse {
   request_id: string
   conversation_id?: string | null
@@ -648,8 +698,8 @@ export interface AIAnalysisResponse {
   diagnosis: {
     headline: string
     summary: string
-    findings: Array<{ level: string; title: string; detail: string; metric_ids: string[] }>
-    actions: Array<{ priority: string; title: string; detail: string; owner: string; validation: string; observation_window: string; expected_impact: string }>
+    findings: AIDiagnosisFinding[]
+    actions: AIRecommendedAction[]
     artifacts: Array<{ type: string; title: string; columns: Array<Record<string, string>>; rows: Array<Record<string, unknown>>; option: Record<string, unknown> }>
     analysis_scope: Record<string, unknown>
     coverage: {
@@ -850,8 +900,21 @@ export interface CustomerAnalysis {
   no_purchase_returners: number
   no_purchase_buyers: number
   no_purchase_conversion_rate: number
+  derived_metrics: DecisionMetric[]
+  quality_warnings: string[]
   segments: CustomerSegmentMetric[]
   daily_metrics: CustomerDailyMetric[]
+}
+
+export interface DecisionMetric {
+  id: string
+  label: string
+  value: number | null
+  unit: "currency" | "count" | "percent" | "ratio"
+  formula: string
+  source_metric_ids: string[]
+  status: "available" | "unavailable" | "inconsistent"
+  note: string
 }
 
 export interface CustomerSegmentMetric {
@@ -868,14 +931,18 @@ export interface CustomerSegmentMetric {
 
 export interface CustomerDailyMetric {
   stat_date: string
+  total_paid_buyers: number
+  total_paid_amount: number
+  first_purchase_paid_buyers: number | null
+  first_purchase_paid_amount: number | null
   new_visitors: number
   new_paid_buyers: number
-  new_paid_amount: number
+  new_paid_amount: number | null
   no_purchase_returners: number
   no_purchase_buyers: number
   repeat_returners: number
   repeat_buyers: number
-  repeat_paid_amount: number
+  repeat_paid_amount: number | null
 }
 
 export interface MemberAnalysis {

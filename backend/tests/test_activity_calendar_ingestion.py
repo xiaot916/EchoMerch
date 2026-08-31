@@ -6,8 +6,9 @@ import sys
 import tempfile
 import unittest
 from contextlib import closing
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -17,6 +18,7 @@ from app.core.local_database import ACTIVITY_CALENDAR_COLUMNS  # noqa: E402
 from app.warehouse.store import WarehouseStore  # noqa: E402
 from app.warehouse.sycm_activity_calendar import parse_payload  # noqa: E402
 from app.modules.collection.registry import COLLECTION_DATASET_BY_KEY  # noqa: E402
+from scripts.backfill_sycm_activity_calendar import _years_for_args  # noqa: E402
 
 
 QUERY_DAY = date(2026, 1, 1)
@@ -44,6 +46,26 @@ def activity_payload() -> dict[str, object]:
                 "activityStart": 1771862400000,
                 "activityEnd": 1773071999000,
             },
+        ],
+    }
+
+
+def single_activity_payload(year: int, activity_id: int, name: str) -> dict[str, object]:
+    timezone = ZoneInfo("Asia/Shanghai")
+    start = int(datetime(year, 6, 1, tzinfo=timezone).timestamp() * 1000)
+    end = int(datetime(year, 6, 3, 23, 59, 59, tzinfo=timezone).timestamp() * 1000)
+    return {
+        "code": 0,
+        "message": "操作成功",
+        "data": [
+            {
+                "activityId": activity_id,
+                "actName": name,
+                "actStatus": "3",
+                "activityType": 1,
+                "activityStart": start,
+                "activityEnd": end,
+            }
         ],
     }
 
@@ -116,13 +138,13 @@ class ActivityCalendarIngestionTests(unittest.TestCase):
                     rows,
                     [
                         (
-                            "2026-01-06",
+                            "2026-01-01",
                             "年货开门红预售",
                             "2026-01-06 00:00:00",
                             "2026-01-08 23:59:59",
                         ),
                         (
-                            "2026-02-24",
+                            "2026-01-01",
                             "2026年天猫38开门红&38焕新周",
                             "2026-02-24 00:00:00",
                             "2026-03-09 23:59:59",
@@ -139,7 +161,7 @@ class ActivityCalendarIngestionTests(unittest.TestCase):
                 ).fetchone()
                 self.assertIsNone(raw_table)
 
-    def test_ingestion_replaces_the_entire_store_snapshot(self) -> None:
+    def test_ingestion_replaces_only_the_requested_year(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             database_path = root / "warehouse.sqlite3"
@@ -173,6 +195,83 @@ class ActivityCalendarIngestionTests(unittest.TestCase):
                     'select "活动名称" from store_activity_calendar_events order by "活动名称"'
                 ).fetchall()
                 self.assertEqual(rows, [("2026年天猫38开门红&38焕新周",)])
+
+    def test_refreshing_current_year_preserves_historical_years(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database_path = root / "warehouse.sqlite3"
+            history_path = root / "history.json"
+            current_path = root / "current.json"
+            refreshed_path = root / "refreshed.json"
+            history_path.write_text(
+                json.dumps(single_activity_payload(2025, 202501, "2025历史活动"), ensure_ascii=False),
+                encoding="utf-8",
+            )
+            current_path.write_text(
+                json.dumps(single_activity_payload(2026, 202601, "2026原活动"), ensure_ascii=False),
+                encoding="utf-8",
+            )
+            refreshed_path.write_text(
+                json.dumps(single_activity_payload(2026, 202602, "2026刷新活动"), ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            store = WarehouseStore(database_path)
+            store.ingest_sycm_activity_calendar(
+                history_path, date(2025, 1, 1), "碧芭宝贝旗舰店", replace_year=2025
+            )
+            store.ingest_sycm_activity_calendar(
+                current_path, QUERY_DAY, "碧芭宝贝旗舰店", replace_year=2026
+            )
+            store.ingest_sycm_activity_calendar(
+                refreshed_path, QUERY_DAY, "碧芭宝贝旗舰店", replace_year=2026
+            )
+
+            with closing(sqlite3.connect(database_path)) as conn:
+                rows = conn.execute(
+                    'select "业务日期", "活动名称" from store_activity_calendar_events order by "业务日期"'
+                ).fetchall()
+                self.assertEqual(
+                    rows,
+                    [("2025-01-01", "2025历史活动"), ("2026-01-01", "2026刷新活动")],
+                )
+
+    def test_empty_current_year_response_keeps_historical_years(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database_path = root / "warehouse.sqlite3"
+            history_path = root / "history.json"
+            current_path = root / "current.json"
+            empty_path = root / "empty.json"
+            history_path.write_text(
+                json.dumps(single_activity_payload(2025, 202501, "2025历史活动"), ensure_ascii=False),
+                encoding="utf-8",
+            )
+            current_path.write_text(
+                json.dumps(single_activity_payload(2026, 202601, "2026原活动"), ensure_ascii=False),
+                encoding="utf-8",
+            )
+            empty_path.write_text(
+                json.dumps({"code": 0, "message": "操作成功", "data": []}),
+                encoding="utf-8",
+            )
+
+            store = WarehouseStore(database_path)
+            store.ingest_sycm_activity_calendar(
+                history_path, date(2025, 1, 1), "碧芭宝贝旗舰店", replace_year=2025
+            )
+            store.ingest_sycm_activity_calendar(
+                current_path, QUERY_DAY, "碧芭宝贝旗舰店", replace_year=2026
+            )
+            store.ingest_sycm_activity_calendar(
+                empty_path, QUERY_DAY, "碧芭宝贝旗舰店", replace_year=2026
+            )
+
+            with closing(sqlite3.connect(database_path)) as conn:
+                rows = conn.execute(
+                    'select "业务日期", "活动名称" from store_activity_calendar_events'
+                ).fetchall()
+                self.assertEqual(rows, [("2025-01-01", "2025历史活动")])
 
     def test_successful_empty_response_clears_the_store_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -243,5 +342,19 @@ class ActivityCalendarIngestionTests(unittest.TestCase):
                 )
 
 
+class ActivityCalendarYearPlanTests(unittest.TestCase):
+    def test_default_plan_is_current_year_and_previous_two_years(self) -> None:
+        self.assertEqual(
+            _years_for_args(None, None, None, today=date(2026, 8, 31)),
+            [2024, 2025, 2026],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
+
+    def test_date_range_requests_each_year_once(self) -> None:
+        self.assertEqual(
+            _years_for_args(date(2024, 7, 1), date(2026, 8, 31), None),
+            [2024, 2025, 2026],
+        )

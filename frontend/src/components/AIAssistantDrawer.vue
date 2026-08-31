@@ -1,20 +1,24 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue"
-import { Bot, CheckCircle2, ChevronRight, Clock3, LoaderCircle, Send, TriangleAlert, X } from "lucide-vue-next"
+import { Bot, CheckCircle2, ChevronRight, Clock3, LoaderCircle, Send, Sparkles, TriangleAlert, X } from "lucide-vue-next"
 import { streamAnalyzeWithAI } from "@/api"
 import type { AIStreamEvent } from "@/api"
-import type { AIAnalysisResponse } from "@/types"
+import type { AIAnalysisResponse, AIDomain, AIPageProfile } from "@/types"
 import { renderMarkdown } from "@/utils/markdown"
 
 const props = withDefaults(defineProps<{
   open: boolean
-  domain?: "auto" | "overview" | "traffic" | "promotion" | "market" | "product" | "customer" | "customer-service" | "content" | "live" | "campaign" | "reviews"
+  pageKey: string
+  profile?: AIPageProfile | null
+  domain?: AIDomain
   title?: string
   storeId?: number | null
   startDate?: string | null
   endDate?: string | null
   pageContext?: Record<string, unknown>
-}>(), { domain: "auto", title: "AI 经营助手", storeId: null, startDate: null, endDate: null })
+  runQuestion?: string
+  runToken?: number
+}>(), { profile: null, domain: "auto", title: "AI 经营助手", storeId: null, startDate: null, endDate: null, runQuestion: "", runToken: 0 })
 const emit = defineEmits<{ close: [] }>()
 const question = ref("")
 const loading = ref(false)
@@ -25,15 +29,20 @@ const streamSteps = ref<Array<{ kind: string; name: string; status: string; deta
 const activeSkill = ref<AIAnalysisResponse["skill"] | null>(null)
 const supportingSkills = ref<AIAnalysisResponse["supporting_skills"]>([])
 const conversationId = ref<string | null>(null)
-const conversationStorageKey = computed(() => `echomerch.ai.drawer.conversation.v1:${props.storeId || "global"}`)
+const lastRunToken = ref(0)
+const resolvedPageKey = computed(() => props.pageKey || props.profile?.key || "global")
+const resolvedDomain = computed<AIDomain>(() => props.profile?.domain || props.domain)
+const conversationStorageKey = computed(() => `echomerch.ai.drawer.conversation.v2:${props.storeId || "global"}:${resolvedPageKey.value}`)
+const diagnosticQuestion = computed(() => props.profile?.diagnostic_question || "诊断当前页面，给出结果、原因、风险和可验证动作")
 const quickQuestions = computed(() => {
-  const pageQuestions = props.pageContext?.recommended_questions
-  if (Array.isArray(pageQuestions) && pageQuestions.length) return pageQuestions.slice(0, 3).map((item) => String(item))
-  if (props.domain === "traffic") return ["哪些流量来源值得加预算？", "有没有高流量低转化的来源？", "流量数据缺什么？"]
-  if (props.domain === "promotion") return ["哪些推广场景应该降预算？", "当前推广 ROI 是否健康？", "帮我找高花费低产出的计划"]
-  if (props.domain === "market") return ["当前市场有哪些竞品机会？", "哪些搜索词值得小预算验证？", "市场数据缺哪些日期？"]
+  if (props.profile?.recommended_questions.length) return props.profile.recommended_questions.slice(0, 3)
+  if (resolvedDomain.value === "traffic") return ["哪些流量来源值得进入限额测试？", "有没有高流量低转化的来源？", "流量数据缺什么？"]
+  if (resolvedDomain.value === "promotion") return ["哪些推广场景应该降预算？", "当前推广 ROI 是否健康？", "帮我找高花费低产出的计划"]
+  if (resolvedDomain.value === "market") return ["当前市场有哪些竞品机会？", "哪些搜索词值得小预算验证？", "市场数据缺哪些日期？"]
   return ["为什么昨天成交下降？", "今天最应该先做什么？", "这段经营数据缺什么？"]
 })
+const riskFindings = computed(() => result.value?.diagnosis.findings.filter((item) => ["critical", "warning"].includes(item.level)) || [])
+const opportunityFindings = computed(() => result.value?.diagnosis.findings.filter((item) => !["critical", "warning"].includes(item.level)) || [])
 function artifacts() { return result.value?.diagnosis.artifacts || [] }
 function inventoryData() { return result.value?.mcp_results?.find((item) => item.tool === "inventory.query")?.data || null }
 function inventoryItems(): Array<Record<string, any>> { return (inventoryData()?.items || []) as Array<Record<string, any>> }
@@ -92,6 +101,7 @@ function streamStepLabel(step: { kind: string; name: string }) {
   if (step.kind === "model") return `分析模型 · ${step.name}`
   return step.name
 }
+function confidenceLabel(value: string) { return value === "high" ? "高" : value === "low" ? "低" : "中" }
 function cleanAnswer(value: unknown): string { return renderMarkdown(value) }
 
 async function ask(value = question.value): Promise<void> {
@@ -107,7 +117,7 @@ async function ask(value = question.value): Promise<void> {
   supportingSkills.value = []
   try {
     result.value = await streamAnalyzeWithAI(
-      { question: text, conversation_id: conversationId.value, store_id: props.storeId, start_date: props.startDate, end_date: props.endDate, domain: props.domain, page_context: { ...props.pageContext, page: props.title, route: window.location.pathname }, use_model: true },
+      { question: text, conversation_id: conversationId.value, store_id: props.storeId, start_date: props.startDate, end_date: props.endDate, domain: resolvedDomain.value, page_key: resolvedPageKey.value, page_context: { ...props.pageContext, page: props.title, route: window.location.pathname }, use_model: true },
       (event: AIStreamEvent) => {
         if (event.event === "token" && event.text) streamText.value += event.text
         if (event.event === "skill") {
@@ -138,21 +148,33 @@ async function ask(value = question.value): Promise<void> {
 
 watch(conversationStorageKey, (key) => {
   conversationId.value = localStorage.getItem(key)
+  result.value = null
+  error.value = ""
+  question.value = ""
 }, { immediate: true })
+
+watch([() => props.open, () => props.runToken], ([open, token]) => {
+  if (!open || !token || token === lastRunToken.value || !props.runQuestion.trim()) return
+  lastRunToken.value = token
+  void ask(props.runQuestion)
+})
 </script>
 
 <template>
   <aside v-if="open" class="ai-assistant-drawer" aria-label="AI 经营助手">
     <header class="ai-assistant-header"><div><span><Bot :size="15" />AI 赋能</span><strong>{{ title }}</strong></div><button class="icon-button" title="关闭 AI 助手" @click="emit('close')"><X :size="17" /></button></header>
     <div class="ai-assistant-body">
-      <div v-if="!result && !loading" class="ai-assistant-welcome"><Bot :size="28" /><strong>把当前页面的数据变成行动</strong><p>问题会自动带上当前店铺、日期和业务上下文。</p></div>
+      <div v-if="!result && !loading" class="ai-assistant-welcome"><Bot :size="28" /><strong>把当前页面的数据变成行动</strong><p>{{ profile?.goal || "问题会自动带上当前店铺、日期和业务上下文。" }}</p></div>
+      <button v-if="!result && !loading" class="ai-page-diagnose" type="button" @click="ask(diagnosticQuestion)"><Sparkles :size="15" /><span><b>生成本页经营诊断</b><small>结果、原因、机会风险与行动卡</small></span><ChevronRight :size="15" /></button>
       <div v-if="!result && !loading" class="ai-quick-list"><button v-for="item in quickQuestions" :key="item" @click="ask(item)">{{ item }}<ChevronRight :size="14" /></button></div>
         <section v-if="loading" class="ai-loading ai-drawer-agent-loading"><div class="ai-thinking-head"><LoaderCircle :size="22" class="spinning" /><div><strong>{{ streamText ? "正在流式生成回答" : "正在执行分析能力" }}</strong><small>实时展示可审计的能力与数据调用</small></div></div><div v-if="activeSkill" class="ai-agent-capabilities"><span>主 Agent</span><b>{{ activeSkill.display_name }}</b><em v-for="skill in supportingSkills" :key="skill.name">{{ skill.display_name }}</em></div><div v-if="streamSteps.length" class="ai-live-step-list"><div v-for="(step, index) in streamSteps" :key="`${step.kind}-${step.name}-${index}`" :class="`is-${step.status}`"><LoaderCircle v-if="step.status === 'running'" :size="13" class="spinning" /><CheckCircle2 v-else-if="step.status === 'completed'" :size="13" /><TriangleAlert v-else-if="step.status === 'failed'" :size="13" /><Clock3 v-else :size="13" /><span><b>{{ streamStepLabel(step) }}</b><small>{{ step.detail }}</small></span></div></div><div v-if="streamText" class="ai-stream-answer ai-markdown-content" v-html="cleanAnswer(streamText)"></div></section>
       <section v-if="error" class="ai-error">{{ error }}</section>
       <section v-if="result" class="ai-result">
         <div class="ai-status-line"><span :class="`ai-status-${result.status}`">{{ result.status === "partial" ? "部分数据" : result.status === "no_data" ? "暂无数据" : "已完成" }}</span><small>{{ result.skill.display_name }} · 置信度 {{ result.diagnosis.confidence === "high" ? "高" : result.diagnosis.confidence === "low" ? "低" : "中" }}</small></div>
-        <h3>{{ result.diagnosis.headline }}</h3><div class="ai-answer ai-markdown-content" v-html="cleanAnswer(result.answer)"></div>
-        <div class="ai-drawer-coverage"><span>{{ inventoryData() ? "库存快照覆盖" : "覆盖" }} {{ result.diagnosis.coverage.covered_days || 0 }}/{{ result.diagnosis.coverage.expected_days || 0 }} 天</span><span v-if="!inventoryData()">最新业务日 {{ result.diagnosis.coverage.latest_data_date || "--" }}</span><span v-if="result.diagnosis.coverage.missing_dates.length">缺失 {{ result.diagnosis.coverage.missing_dates.slice(0, 2).join("、") }}</span><span v-else-if="result.diagnosis.coverage.no_data_datasets.length">平台无数据</span></div>
+        <section class="ai-decision-layer"><header><span>1</span><strong>数据状态</strong></header><div class="ai-drawer-coverage"><span>{{ inventoryData() ? "库存快照覆盖" : "覆盖" }} {{ result.diagnosis.coverage.covered_days || 0 }}/{{ result.diagnosis.coverage.expected_days || 0 }} 天</span><span v-if="!inventoryData()">最新业务日 {{ result.diagnosis.coverage.latest_data_date || "--" }}</span><span v-if="result.diagnosis.coverage.missing_dates.length">缺失 {{ result.diagnosis.coverage.missing_dates.slice(0, 2).join("、") }}</span><span v-if="result.diagnosis.coverage.partial_datasets.length">部分字段 {{ result.diagnosis.coverage.partial_datasets.length }} 项</span><span v-if="result.diagnosis.coverage.no_data_datasets.length">平台无数据 {{ result.diagnosis.coverage.no_data_datasets.length }} 项</span></div></section>
+        <section class="ai-decision-layer ai-core-result"><header><span>2</span><strong>核心结果</strong></header><h3>{{ result.diagnosis.headline }}</h3><p>{{ result.diagnosis.summary }}</p></section>
+        <section v-if="result.diagnosis.findings.length" class="ai-decision-layer"><header><span>3</span><strong>原因与证据</strong></header><div class="ai-finding-list"><article v-for="finding in result.diagnosis.findings" :key="`${finding.level}-${finding.title}`"><div><b>{{ finding.title }}</b><em>{{ confidenceLabel(finding.confidence) }}置信度</em></div><p>{{ finding.detail }}</p><small v-if="finding.evidence.length">证据：{{ finding.evidence.join("；") }}</small></article></div></section>
+        <section v-if="riskFindings.length || opportunityFindings.length" class="ai-decision-layer"><header><span>4</span><strong>机会与风险</strong></header><div class="ai-opportunity-risk"><div v-if="riskFindings.length"><b>风险</b><span v-for="finding in riskFindings" :key="`risk-${finding.title}`">{{ finding.title }}{{ finding.impact ? ` · ${finding.impact}` : "" }}</span></div><div v-if="opportunityFindings.length"><b>机会</b><span v-for="finding in opportunityFindings" :key="`opportunity-${finding.title}`">{{ finding.title }}{{ finding.impact ? ` · ${finding.impact}` : "" }}</span></div></div></section>
         <div v-if="result.supporting_skills.length" class="ai-agent-capabilities ai-agent-capabilities-final"><span>Agent 能力</span><b>{{ result.skill.display_name }}</b><em v-for="skill in result.supporting_skills" :key="skill.name">{{ skill.display_name }}</em><small>{{ result.execution_steps.filter((step) => step.kind === 'mcp' && step.status === 'completed').length }} 个数据工具已完成</small></div>
         <div v-if="memoryText('last_question') !== '--' || memoryText('headline') !== '--'" class="ai-drawer-memory">
           <strong>本轮记忆</strong>
@@ -169,10 +191,11 @@ watch(conversationStorageKey, (key) => {
         <div v-if="nextQuestions().length" class="ai-drawer-next-questions"><strong>下一步追问</strong><div class="ai-question-chips"><button v-for="item in nextQuestions().slice(0, 4)" :key="item" type="button" @click="ask(item)">{{ item }}</button></div></div>
         <div v-if="inventoryData()" class="ai-drawer-inventory-meta"><div><small>库存业务日</small><strong>{{ inventoryData()?.inventory_business_day || inventoryData()?.business_day || "--" }}</strong></div><div><small>快照采集时间</small><strong>{{ inventorySnapshotTime() }}</strong></div><div><small>匹配状态</small><strong>{{ inventoryStatus() }}</strong></div><div><small>快照时效</small><strong>{{ inventoryData()?.snapshot_age_minutes == null ? "--" : `${inventoryData()?.snapshot_age_minutes} 分钟` }}</strong></div></div>
         <div v-if="inventoryItems().length" class="ai-drawer-inventory-table"><strong>库存候选</strong><div class="ai-drawer-table"><table><thead><tr><th>商品</th><th>货品编码</th><th>尺码</th><th>片数</th><th>库存 / 关系</th></tr></thead><tbody><tr v-for="(item, index) in inventoryItems().slice(0, 8)" :key="index"><td>{{ item.goods_name || item.sku_name || "--" }}</td><td>{{ item.goods_no || item.sku_no || "--" }}</td><td>{{ item.size || "--" }}</td><td>{{ item.pieces ?? "--" }}</td><td>{{ item.item_type === "package" ? `组合关系 ${item.components?.length || 0} 个 SKU` : item.available_quantity }}</td></tr></tbody></table></div></div>
-        <div v-if="result.diagnosis.actions.length" class="ai-action-list"><strong>优先动作</strong><article v-for="action in result.diagnosis.actions" :key="`${action.priority}-${action.title}`"><span>{{ action.priority }}</span><div><b>{{ action.title }}</b><small>{{ action.detail }}</small><small>负责人：{{ action.owner }} · 验证：{{ action.validation || "--" }}</small><small>观察：{{ action.observation_window || "--" }} · 预期：{{ action.expected_impact || "--" }}</small></div></article></div>
+        <section v-if="result.diagnosis.actions.length" class="ai-decision-layer"><header><span>5</span><strong>行动卡</strong></header><div class="ai-action-list"><article v-for="action in result.diagnosis.actions" :key="`${action.priority}-${action.title}`"><span>{{ action.priority }}</span><div><b>{{ action.title }}</b><small v-if="action.object_type || action.object_id">对象：{{ [action.object_type, action.object_id].filter(Boolean).join(" · ") }}</small><small v-if="action.problem">问题：{{ action.problem }}</small><small>{{ action.detail }}</small><small>负责人：{{ action.owner }} · 验证：{{ action.verify_metric || action.validation || "--" }}</small><small>观察：{{ action.observation_window || "--" }} · 停止条件：{{ action.stop_condition || "--" }}</small><small>预期：{{ action.expected_impact || "--" }} · 置信度：{{ confidenceLabel(action.confidence) }}</small></div></article></div></section>
         <div v-for="artifact in artifacts()" :key="artifact.title" class="ai-drawer-artifact"><strong>{{ artifact.title }}</strong><div v-if="artifact.rows?.length" class="ai-drawer-table"><table><thead><tr><th v-for="column in artifactColumns(artifact)" :key="column">{{ column }}</th></tr></thead><tbody><tr v-for="(row, index) in artifact.rows.slice(0, 6)" :key="index"><td v-for="column in artifactColumns(artifact)" :key="column">{{ cell(row[column]) }}</td></tr></tbody></table></div></div>
         <div v-if="result.diagnosis.missing_inputs.length" class="ai-drawer-boundary">待补输入：{{ result.diagnosis.missing_inputs.join("、") }}</div>
         <div v-if="result.warnings.length" class="ai-warning-list"><strong>数据提示</strong><p v-for="warning in result.warnings" :key="warning">{{ warning }}</p></div>
+        <div class="ai-decision-layer ai-full-answer"><header><strong>AI 补充判断</strong></header><div class="ai-answer ai-markdown-content" v-html="cleanAnswer(result.answer)"></div></div>
         <button class="ai-follow-up" @click="result = null">继续追问</button>
       </section>
     </div>

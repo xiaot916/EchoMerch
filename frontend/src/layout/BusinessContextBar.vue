@@ -3,12 +3,13 @@ import { computed, ref, watch } from "vue"
 import { CalendarDays, ChevronLeft, ChevronRight, Eye, LoaderCircle, ShoppingBag } from "lucide-vue-next"
 
 import type { StoreRecord } from "@/types"
-import { compactRange, shortDate } from "@/lib/format"
+import { compactRange, shiftIsoDate, shortDate } from "@/lib/format"
 
 const props = defineProps<{
   store: StoreRecord | null
   startDate: string
   endDate: string
+  latestDate?: string
   loading: boolean
 }>()
 
@@ -22,25 +23,23 @@ type RangeMode = "7天" | "30天" | "日" | "周" | "月" | "自定义"
 type CalendarCell = { date: string; day: number; inCurrentMonth: boolean; disabled: boolean }
 
 const rangeMode = ref<RangeMode>("7天")
-const initializedRange = ref(false)
 const dropdownOpen = ref(false)
 const calendarCursor = ref(props.endDate ? props.endDate.slice(0, 7) : "2026-08")
-const availableEndDate = ref(props.endDate)
+const availableEndDate = computed(() => props.latestDate || props.endDate)
 const rangeOptions: RangeMode[] = ["7天", "30天", "日", "周", "月", "自定义"]
 const monthNames = Array.from({ length: 12 }, (_, index) => `${index + 1}月`)
 const isDirectRange = computed(() => rangeMode.value === "7天" || rangeMode.value === "30天")
 const isCalendarMode = computed(() => rangeMode.value === "日" || rangeMode.value === "周")
 
 watch(() => props.endDate, (value) => {
-  if (value && !availableEndDate.value) availableEndDate.value = value
   if (value && !dropdownOpen.value) calendarCursor.value = value.slice(0, 7)
 })
 
-watch([() => props.startDate, () => props.endDate], ([start, end]) => {
-  if (initializedRange.value || !start || !end) return
-  initializedRange.value = true
-  if (start === shiftDate(end, -6)) rangeMode.value = "7天"
-  else if (start === shiftDate(end, -29)) rangeMode.value = "30天"
+watch([() => props.startDate, () => props.endDate, () => props.latestDate], ([start, end, latest]) => {
+  if (!start || !end) return
+  const latestEnd = latest || end
+  if (end === latestEnd && start === shiftIsoDate(end, -6)) rangeMode.value = "7天"
+  else if (end === latestEnd && start === shiftIsoDate(end, -29)) rangeMode.value = "30天"
   else if (start === end) rangeMode.value = "日"
   else if (start === currentWeekStart(end)) rangeMode.value = "周"
   else if (start === `${end.slice(0, 7)}-01`) rangeMode.value = "月"
@@ -56,12 +55,6 @@ function formatLocalDate(date: Date): string {
 
 function parseDate(value: string): Date {
   return new Date(`${value}T12:00:00`)
-}
-
-function shiftDate(value: string, amount: number): string {
-  const date = parseDate(value)
-  date.setDate(date.getDate() + amount)
-  return formatLocalDate(date)
 }
 
 function currentWeekStart(value: string): string {
@@ -84,10 +77,10 @@ function setPeriod(start: string, end: string): void {
 }
 
 function selectRange(mode: RangeMode): void {
-  if (!props.endDate) return
+  if (!availableEndDate.value) return
   if (mode === "7天" || mode === "30天") {
     rangeMode.value = mode
-    setPeriod(shiftDate(props.endDate, mode === "7天" ? -6 : -29), props.endDate)
+    setPeriod(shiftIsoDate(availableEndDate.value, mode === "7天" ? -6 : -29), availableEndDate.value)
     return
   }
   rangeMode.value = mode
@@ -102,7 +95,7 @@ function chooseCalendarDay(value: string): void {
     return
   }
   const start = currentWeekStart(value)
-  const proposedEnd = shiftDate(start, 6)
+  const proposedEnd = shiftIsoDate(start, 6)
   setPeriod(start, proposedEnd > availableEndDate.value ? availableEndDate.value : proposedEnd)
 }
 

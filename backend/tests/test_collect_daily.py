@@ -75,6 +75,7 @@ def test_activity_calendar_is_always_refreshed() -> None:
     )
 
     assert "--refresh-existing" in command
+    assert command[command.index("--years") + 1] == "2026"
 
 
 def test_daily_item_details_are_not_forced_into_snapshot_refresh_mode() -> None:

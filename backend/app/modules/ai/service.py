@@ -12,6 +12,7 @@ from collections.abc import Callable
 from app.core.config import settings
 from app.core.local_database import LocalDatabase
 from app.modules.ai.mcp import CommerceMCPService
+from app.modules.ai.page_profiles import enrich_page_context
 from app.modules.ai.provider import AIProviderError, AgnesProvider
 from app.modules.ai.schemas import (
     AIConversationState,
@@ -441,6 +442,12 @@ class AIAnalysisService:
     ) -> AnalysisResponse:
         started = time.perf_counter()
         request_id = str(uuid4())
+        page_profile, page_context = enrich_page_context(request.page_key, request.page_context)
+        request = request.model_copy(update={
+            "page_key": page_profile.key if page_profile else request.page_key,
+            "domain": page_profile.domain if page_profile else request.domain,
+            "page_context": page_context,
+        })
         conversation = self._conversation_state(request.conversation_id, user_id=user_id, store_id=store_id)
         contextual_request = self._contextual_request(request, conversation)
         skill, supporting_skills = select_skills(contextual_request.question, request.domain, request.page_context)
@@ -1980,10 +1987,16 @@ class AIAnalysisService:
             next_questions.append("是否补充规划输入后重新计算情景？")
         causal_boundary = "" if skill.descriptor.name == "inventory-query" else diagnosis.causal_boundary or "当前结论是描述性分析或平台归因贡献；没有实验、对照或平台增量报告时，不代表因果增量。"
         actions = []
+        focus_dimensions = request.page_context.get("focus_dimensions") or []
+        default_object_type = str(focus_dimensions[0]) if isinstance(focus_dimensions, list) and focus_dimensions else "经营对象"
         for action in diagnosis.actions:
             actions.append(action.model_copy(update={
                 "observation_window": action.observation_window or ("3-7天" if action.priority == "P0" else "7-14天"),
                 "expected_impact": action.expected_impact or "改善对应验证指标，同时不恶化支付转化率、退款率或已知费用效率。",
+                "object_type": action.object_type or default_object_type,
+                "problem": action.problem or action.title,
+                "verify_metric": action.verify_metric or action.validation or "对应经营指标",
+                "stop_condition": action.stop_condition or "观察窗口结束后指标无改善，或退款率、费用率等约束指标明显恶化。",
             }))
         fact_sheet = cls._analysis_fact_sheet(results, coverage)
         artifacts = list(diagnosis.artifacts)

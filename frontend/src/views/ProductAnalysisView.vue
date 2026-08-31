@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue"
+import { useRoute } from "vue-router"
 import { BarChart3, CircleAlert, CircleDollarSign, Eye, Filter, PackageSearch, RefreshCw, Search, ShoppingCart, Target, UsersRound, X } from "lucide-vue-next"
 
 import BusinessChart from "@/components/BusinessChart.vue"
@@ -10,7 +11,8 @@ import type { ProductAnalysisResponse, ProductMetric } from "@/types"
 import { useDashboard } from "@/composables/useDashboard"
 import { currency, number, ratio, compactRange } from "@/lib/format"
 
-const { dashboard } = useDashboard()
+const route = useRoute()
+const { dashboard, currentStoreId } = useDashboard()
 const products = ref<ProductMetric[]>([])
 const analysis = ref<ProductAnalysisResponse | null>(null)
 const selectedProductId = ref("")
@@ -68,8 +70,10 @@ async function load(): Promise<void> {
   try {
     const stores = await fetchStores()
     const { start, end } = queryDates()
-    products.value = await fetchAnalyticsProducts(start, end, stores[0]?.store_id)
-    if (!filteredProducts.value.some((item) => item.product_id === selectedProductId.value)) selectedProductId.value = filteredProducts.value[0]?.product_id || ""
+    products.value = await fetchAnalyticsProducts(start, end, currentStoreId.value ?? stores[0]?.store_id)
+    const requestedProductId = typeof route.query.product_id === "string" ? route.query.product_id : ""
+    if (requestedProductId && products.value.some((item) => item.product_id === requestedProductId)) selectedProductId.value = requestedProductId
+    else if (!filteredProducts.value.some((item) => item.product_id === selectedProductId.value)) selectedProductId.value = filteredProducts.value[0]?.product_id || ""
     await loadAnalysis()
   } catch (exc) {
     error.value = exc instanceof Error ? exc.message : "商品目录读取失败"
@@ -88,7 +92,7 @@ async function loadAnalysis(): Promise<void> {
   try {
     const stores = await fetchStores()
     const { start, end } = queryDates()
-    analysis.value = await fetchProductAnalysis(selectedProductId.value, start, end, stores[0]?.store_id)
+    analysis.value = await fetchProductAnalysis(selectedProductId.value, start, end, currentStoreId.value ?? stores[0]?.store_id)
   } catch (exc) {
     analysis.value = null
     error.value = exc instanceof Error ? exc.message : "单品分析读取失败"
@@ -128,6 +132,9 @@ watch(selectedSeries, () => {
   if (!filteredProducts.value.some((item) => item.product_id === selectedProductId.value)) selectedProductId.value = filteredProducts.value[0]?.product_id || ""
 })
 watch(selectedProductId, () => { if (!loading.value) void loadAnalysis() })
+watch(() => route.query.product_id, (value) => {
+  if (typeof value === "string" && products.value.some((item) => item.product_id === value)) selectedProductId.value = value
+})
 watch(() => [dashboard.value?.range_start, dashboard.value?.range_end], () => { void load() })
 onMounted(() => { void load() })
 </script>

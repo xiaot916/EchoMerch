@@ -12,9 +12,12 @@ import {
 } from "lucide-vue-next"
 
 import AnalyticsTrendChart from "@/components/AnalyticsTrendChart.vue"
+import BusinessActionTable from "@/components/BusinessActionTable.vue"
 import BusinessChart from "@/components/BusinessChart.vue"
 import EmptyState from "@/components/EmptyState.vue"
+import SalesGrowthBridge from "@/components/SalesGrowthBridge.vue"
 import { useDashboard } from "@/composables/useDashboard"
+import { buildSalesGrowthBridge, type BusinessActionRow } from "@/lib/businessDecision"
 import { compactRange, currency, number, ratio, shortDate } from "@/lib/format"
 
 type Granularity = "day" | "week" | "month"
@@ -132,19 +135,38 @@ const refundOption = computed(() => ({
   ],
 }))
 
-const previousUnitPrice = computed(() => {
-  const buyers = comparison.value?.buyers.previous || 0
-  return buyers && comparison.value ? comparison.value.paid_amount.previous / buyers : 0
-})
-
-const businessDrivers = computed(() => {
-  if (!summary.value || !comparison.value) return []
-  return [
-    { label: "访客数", value: number(summary.value.visitors), previous: comparison.value.visitors.change_percent, note: "流量规模" },
-    { label: "支付买家", value: number(summary.value.buyers), previous: comparison.value.buyers.change_percent, note: "成交人数" },
-    { label: "支付转化率", value: ratio(summary.value.conversion_rate), previous: comparison.value.conversion_rate.change_percent, note: "买家 / 访客" },
-    { label: "支付客单价", value: currency(summary.value.customer_unit_price), previous: null, note: "金额 / 买家" },
-  ]
+const currentSalesBridgeInput = computed(() => ({
+  paidAmount: summary.value?.paid_amount ?? 0,
+  visitors: summary.value?.visitors ?? 0,
+  buyers: summary.value?.buyers ?? 0,
+  conversionRate: summary.value?.conversion_rate ?? 0,
+}))
+const previousSalesBridgeInput = computed(() => ({
+  paidAmount: comparison.value?.paid_amount.previous ?? 0,
+  visitors: comparison.value?.visitors.previous ?? 0,
+  buyers: comparison.value?.buyers.previous ?? 0,
+  conversionRate: comparison.value?.conversion_rate.previous ?? 0,
+}))
+const salesBridge = computed(() => buildSalesGrowthBridge(currentSalesBridgeInput.value, previousSalesBridgeInput.value))
+const transactionActions = computed<BusinessActionRow[]>(() => {
+  const rows: BusinessActionRow[] = []
+  if (!coverageIsComplete.value) {
+    rows.push({ id: "coverage", priority: "P0", object: "店铺日报", issue: "统计区间存在缺失日", evidence: missingDateLabel.value || "日报覆盖不完整", impact: `${period.value?.missing_dates.length ?? 0} 个缺失日`, action: "先补采缺失日期，再确认环比和金额贡献是否成立。", validation: "日报覆盖天数 = 应覆盖天数", window: "补采后即时", tone: "risk" })
+  }
+  const negativeDriver = salesBridge.value.drivers.slice().sort((left, right) => left.contribution - right.contribution)[0]
+  if (salesBridge.value.delta < 0 && negativeDriver?.contribution < 0) {
+    rows.push({ id: `driver-${negativeDriver.key}`, priority: "P0", object: negativeDriver.label, issue: "本周期支付下降的首要金额拖累", evidence: negativeDriver.explanation, impact: currency(negativeDriver.contribution), action: negativeDriver.key === "traffic" ? "下钻流量页定位下降渠道与入口。" : negativeDriver.key === "conversion" ? "检查高流量低转化渠道、商品和详情承接。" : "核对正装/MINI结构、关联销售和低客单商品占比。", validation: "支付金额、该驱动贡献与支付买家", window: "3-7 天", tone: "risk" })
+  }
+  const highRefundDay = requestedDayRows.value.filter((item) => item.metric && item.metric.refund_amount > 0).sort((left, right) => (right.metric?.refund_rate ?? 0) - (left.metric?.refund_rate ?? 0))[0]
+  if (highRefundDay?.metric) {
+    rows.push({ id: `refund-${highRefundDay.date}`, priority: highRefundDay.metric.refund_rate >= refundRate.value * 1.25 ? "P0" : "P1", object: highRefundDay.date, issue: "区间内金额退款率最高日期", evidence: `退款率 ${ratio(highRefundDay.metric.refund_rate)}，支付 ${currency(highRefundDay.metric.paid_amount)}`, impact: currency(highRefundDay.metric.refund_amount), action: "下钻当日退款商品、活动承诺和客服问题，区分集中退款与日常波动。", validation: "退款金额、退款率、净支付", window: "1-3 天", tone: "warning" })
+  }
+  const averageVisitors = requestedDayRows.value.length ? (summary.value?.visitors ?? 0) / requestedDayRows.value.filter((item) => item.metric).length : 0
+  const lowConversionDay = requestedDayRows.value.filter((item) => item.metric && item.metric.visitors >= averageVisitors * .7 && item.metric.conversion_rate < (summary.value?.conversion_rate ?? 0) * .75).sort((left, right) => (right.metric?.visitors ?? 0) - (left.metric?.visitors ?? 0))[0]
+  if (lowConversionDay?.metric) {
+    rows.push({ id: `conversion-${lowConversionDay.date}`, priority: "P1", object: lowConversionDay.date, issue: "有流量但支付转化明显低于区间水平", evidence: `${number(lowConversionDay.metric.visitors)} 访客，转化 ${ratio(lowConversionDay.metric.conversion_rate)}`, impact: currency(lowConversionDay.metric.paid_amount), action: "核对当日主要渠道、商品库存、价格权益和详情页承接。", validation: "转化率、加购率、支付买家", window: "3-7 天", tone: "warning" })
+  }
+  return rows.slice(0, 4)
 })
 
 function changeLabel(change: number | null): string {
@@ -190,9 +212,8 @@ function changeClass(change: number | null): string {
       </article>
 
       <article class="overview-panel driver-panel">
-        <div class="overview-panel-heading"><div><h2>交易指标对比</h2></div></div>
-        <div class="driver-list"><div v-for="driver in businessDrivers" :key="driver.label" class="driver-row"><div><strong>{{ driver.label }}</strong><span>{{ driver.note }}</span></div><div><strong>{{ driver.value }}</strong><em v-if="driver.previous !== undefined && driver.previous !== null" :class="changeClass(driver.previous)">{{ changeLabel(driver.previous) }}</em><small v-else>当前区间</small></div></div></div>
-        <p class="panel-footnote">环比按同等天数的上一周期计算；当前区间缺日报时不显示环比。</p>
+        <div class="overview-panel-heading"><div><h2>支付金额增长贡献</h2></div><span class="range-note">访客 × 转化率 × 客单价</span></div>
+        <SalesGrowthBridge :current="currentSalesBridgeInput" :previous="previousSalesBridgeInput" :comparable="comparisonAvailable" :height="250" />
       </article>
     </section>
 
@@ -201,6 +222,8 @@ function changeClass(change: number | null): string {
       <BusinessChart v-if="dashboard.daily_metrics.length" :option="refundOption" ariaLabel="退款金额和金额退款率趋势图" :height="300" />
       <EmptyState v-else title="暂无退款趋势" detail="当前范围没有店铺日概览退款字段。" />
     </section>
+
+    <BusinessActionTable :rows="transactionActions" eyebrow="交易诊断" title="优先排查对象" note="金额贡献、退款与转化异常" />
 
     <section class="overview-panel daily-overview-panel">
       <div class="overview-panel-heading"><div><h2>交易明细</h2></div><span class="range-note">{{ recentDays.length }} 个统计日</span></div>

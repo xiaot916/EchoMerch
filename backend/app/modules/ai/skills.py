@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 from typing import Any, Callable
 
+from app.modules.ai.page_profiles import get_page_ai_profile
 from app.modules.ai.schemas import (
     ArtifactSpec,
     Diagnosis,
@@ -1027,17 +1028,92 @@ def _product_diagnosis(results: list[MCPEnvelope]) -> Diagnosis:
 
 
 def _customer_diagnosis(results: list[MCPEnvelope]) -> Diagnosis:
-    result = results[0]
-    values = result.data.get("aggregates", {})
-    new_buyers = float(values.get("new_paid_buyers") or 0)
-    repeat_buyers = float(values.get("repeat_buyers") or 0)
-    no_purchase_buyers = float(values.get("no_purchase_buyers") or 0)
-    findings = [DiagnosisFinding(level="info", title="客户结构已汇总", detail=f"新客成交 {new_buyers:,.0f}，老客复购 {repeat_buyers:,.0f}，未购回访成交 {no_purchase_buyers:,.0f}。")]
-    actions = [RecommendedAction(priority="P1", title="分层运营客户", detail="新客重点优化首单承接，未购回访做召回，老客复购做周期和会员权益运营。", validation="复购人数和回访转化率连续提升")]
-    if repeat_buyers == 0 and new_buyers > 0:
-        findings.append(DiagnosisFinding(level="warning", title="当前区间没有识别到老客复购", detail="需要确认客户分析是否完成采集，或本期确实没有复购成交。"))
-        actions.insert(0, RecommendedAction(priority="P0", title="核查复购数据和召回动作", detail="先用 data.coverage 区分未采集与平台无数据，再检查老客触达和复购权益。", owner="CRM运营", validation="复购数据可解释且复购人数回升"))
-    return Diagnosis(headline=findings[0].title, summary=findings[0].detail, findings=findings, actions=actions, artifacts=[ArtifactSpec(type="metric_table", title="客户结构", rows=[{"指标": "新客成交人数", "值": new_buyers}, {"指标": "老客复购人数", "值": repeat_buyers}, {"指标": "未购回访成交人数", "值": no_purchase_buyers}])])
+    result = next((item for item in results if item.tool == "customers.get_diagnosis"), results[0] if results else None)
+    if result is None or result.status == "no_data":
+        detail = "所选区间没有可用客户分层记录，不能把缺失数据解释为没有首购或复购。"
+        return Diagnosis(
+            headline="客户生命周期数据不可用",
+            summary=detail,
+            findings=[DiagnosisFinding(level="warning", title="客户数据未返回", detail=detail, confidence="high")],
+            actions=[RecommendedAction(priority="P0", title="核对客户数据覆盖", detail="检查客户分析与店铺日概览是否覆盖同一日期，再重新计算首购和复购结构。", owner="数据运营", validation="客户分析与总支付覆盖日期一致", verify_metric="客户数据覆盖天数", stop_condition="覆盖未对齐前不输出新老客结构结论", confidence="high")],
+            causal_boundary="当前没有客户事实数据，不对新客、老客或召回效果做推断。",
+        )
+    data = result.data or {}
+    raw = data.get("raw") or {}
+    derived_rows = data.get("derived_metrics") or []
+    derived = {str(item.get("id")): item for item in derived_rows}
+
+    def value(metric_id: str) -> float | None:
+        item = derived.get(metric_id) or {}
+        raw_value = item.get("value")
+        return float(raw_value) if item.get("status") == "available" and raw_value is not None else None
+
+    first_buyers = value("first_purchase_paid_buyers")
+    first_amount = value("first_purchase_paid_amount")
+    first_buyer_share = value("first_purchase_buyer_share")
+    first_amount_share = value("first_purchase_amount_share")
+    repeat_buyers = float(raw.get("repeat_paid_buyers") or 0)
+    repeat_amount = float(raw.get("repeat_paid_amount") or 0)
+    repeat_buyer_share = value("repeat_buyer_share")
+    repeat_amount_share = value("repeat_amount_share")
+    first_unit_price = value("first_purchase_unit_price")
+    repeat_unit_price = value("repeat_unit_price")
+    no_purchase_buyers = float(raw.get("no_purchase_paid_buyers") or 0)
+    findings: list[DiagnosisFinding] = []
+    if first_buyers is not None and first_amount is not None:
+        findings.append(DiagnosisFinding(
+            level="info",
+            title="首次购买与老客贡献已完成同口径拆分",
+            detail=f"首次购买 {first_buyers:,.0f} 人、金额 {first_amount:,.0f}，分别占支付买家和支付金额 {first_buyer_share or 0:.1f}%、{first_amount_share or 0:.1f}%；老客复购 {repeat_buyers:,.0f} 人、金额 {repeat_amount:,.0f}，占比 {repeat_buyer_share or 0:.1f}%、{repeat_amount_share or 0:.1f}%。",
+            metric_ids=["first_purchase_paid_buyers", "first_purchase_paid_amount", "repeat_paid_buyers", "repeat_paid_amount"],
+            evidence=["总支付人数/金额减去已购回访支付人数/金额"],
+            impact="明确成交来自首次购买还是老客复购，避免把新访成交误当作完整新客。",
+            confidence="high",
+        ))
+    if first_unit_price is not None and repeat_unit_price is not None:
+        direction = "高于" if repeat_unit_price >= first_unit_price else "低于"
+        findings.append(DiagnosisFinding(
+            level="positive" if repeat_unit_price >= first_unit_price else "warning",
+            title="新老客客单差异已识别",
+            detail=f"首次购买客单 {first_unit_price:,.2f}，老客客单 {repeat_unit_price:,.2f}，老客客单{direction}首次购买客单。",
+            metric_ids=["first_purchase_unit_price", "repeat_unit_price"],
+            evidence=["同口径金额 / 同口径支付人数"],
+            impact="用于判断老客经营应侧重召回规模还是跨品类和组合购提升。",
+            confidence="high",
+        ))
+    findings.append(DiagnosisFinding(
+        level="info",
+        title="未购回访是首次购买的重要承接段",
+        detail=f"未购回访成交 {no_purchase_buyers:,.0f} 人；完整首次购买口径包含新访成交和未购回访后的首次成交。",
+        metric_ids=["no_purchase_paid_buyers", "first_purchase_paid_buyers"],
+        confidence="high",
+    ))
+    gaps = [item for item in derived_rows if item.get("id") in {"classified_buyer_gap", "classified_amount_gap"} and item.get("status") == "available" and abs(float(item.get("value") or 0)) > 1]
+    if gaps:
+        findings.append(DiagnosisFinding(
+            level="warning",
+            title="客户分类与总盘存在对账差额",
+            detail="；".join(f"{item.get('label')} {float(item.get('value') or 0):,.2f}" for item in gaps) + "。优先核对有效日期、平台人群定义和金额占比四舍五入。",
+            metric_ids=[str(item.get("id")) for item in gaps],
+            confidence="high",
+        ))
+    actions = [
+        RecommendedAction(priority="P0", title="建立首购与老客双盘复盘", detail="按首次购买和老客分别查看人数、金额、客单和商品结构，不再用新访成交替代完整新客。", owner="CRM运营", validation="每周稳定输出首购/老客人数、金额、占比和客单", observation_window="7天", expected_impact="明确成交结构变化来源", object_type="customer_segment", object_id="first_purchase_vs_repeat", problem="新访成交不能代表完整新客", verify_metric="首次购买金额占比、老客金额占比", stop_condition="分类对账差额持续异常时暂停经营归因", confidence="high"),
+        RecommendedAction(priority="P1", title="单独优化未购回访承接", detail="按未购回访来源和商品检查详情、优惠、客服与库存承接，验证其对首次购买的贡献。", owner="用户运营", validation="未购回访转化率提升且退款率不恶化", observation_window="7-14天", expected_impact="提升首次购买人数", object_type="customer_segment", object_id="no_purchase_returner", problem="未购回访承接效率需要独立管理", verify_metric="未购回访转化率", stop_condition="转化无提升且优惠成本持续增加", confidence="medium"),
+        RecommendedAction(priority="P1", title="按客单差设计老客运营", detail="若老客客单更高，优先做复购周期和跨系列组合；若更低，优先核对低价试用装或优惠依赖。", owner="会员运营", validation="老客客单和复购人数同步改善", observation_window="14-30天", expected_impact="改善老客成交质量", object_type="customer_segment", object_id="repeat", problem="老客规模与客单需要联合经营", verify_metric="老客支付人数、老客支付客单价", stop_condition="退款率或优惠成本显著恶化", confidence="medium"),
+    ]
+    rows = [{"指标": item.get("label"), "值": item.get("value"), "公式": item.get("formula"), "状态": item.get("status"), "说明": item.get("note")} for item in derived_rows]
+    return Diagnosis(
+        headline=findings[0].title if findings else "客户生命周期诊断已完成",
+        summary=findings[0].detail if findings else "已完成客户生命周期指标计算。",
+        findings=findings[:5],
+        actions=actions,
+        artifacts=[ArtifactSpec(type="metric_table", title="客户派生经营指标", rows=rows), ArtifactSpec(type="matrix", title="客户三段人群", rows=data.get("segments") or [])],
+        assumptions=[data.get("semantics", {}).get("population", "区间人数为每日累计，不是跨日去重人数。")],
+        denominator_notes=["首次购买人数 = 总支付买家数 - 老客复购人数；首次购买金额 = 总支付金额 - 老客复购金额。"],
+        causal_boundary=data.get("semantics", {}).get("causal_boundary", "客户结构变化为描述性证据，不代表营销因果增量。"),
+        next_questions=["下钻首次购买和老客的商品结构", "比较客户结构与上一周期变化", "检查未购回访的主要来源"],
+    )
 
 
 def _utry_repurchase_diagnosis(results: list[MCPEnvelope]) -> Diagnosis:
@@ -1524,34 +1600,12 @@ def select_skills(question: str, domain: str, page_context: dict[str, Any] | Non
     """
     page_context = page_context or {}
     page_key = str(page_context.get("page_key") or page_context.get("page") or "")
-    page_skill_names = {
-        "overview": "shop-overview-diagnosis",
-        "analytics": "shop-overview-diagnosis",
-        "products": "product-structure-diagnosis",
-        "product-analysis": "product-diagnosis",
-        "service": "customer-service-diagnosis",
-        "traffic": "traffic-diagnosis",
-        "promotions": "promotion-roi",
-        "promotions-cps": "data-exploration",
-        "market": "market-insight",
-        "customers": "customer-retention",
-        "customer-members": "customer-retention",
-        "reviews": "review-diagnosis",
-        "content": "data-exploration",
-        "live": "data-exploration",
-        "marketing-activities": "data-exploration",
-        "marketing-flash-sale": "data-exploration",
-        "marketing-new-customer": "data-exploration",
-        "marketing-shopping-gold": "data-exploration",
-        "marketing-bybt": "data-exploration",
-        "inventory": "data-exploration",
-        "brand-assets": "data-exploration",
-    }
     primary = None
     # A greeting remains a lightweight chat even inside a business page.
     # Generic page prompts (“分析一下当前页面”) use the page's real domain.
     if page_key and page_key != "ai" and not _is_general_chat_question(question):
-        page_name = page_skill_names.get(page_key)
+        profile = get_page_ai_profile(page_key)
+        page_name = profile.primary_skill if profile else None
         primary = next((skill for skill in SKILLS if skill.descriptor.name == page_name), None) if page_name else None
     # The AI workbench is a cross-domain page. Let explicit specialist prompts
     # win, while broad store questions use the overview orchestrator.

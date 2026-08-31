@@ -10,21 +10,21 @@ import {
   Gauge,
   PackageCheck,
   ShoppingCart,
-  Target,
   TrendingDown,
   TrendingUp,
 } from "lucide-vue-next"
 
 import EmptyState from "@/components/EmptyState.vue"
 import BusinessChart from "@/components/BusinessChart.vue"
+import BusinessActionTable from "@/components/BusinessActionTable.vue"
 import MetricCard from "@/components/MetricCard.vue"
-import ProductContributionChart from "@/components/ProductContributionChart.vue"
 import { fetchAnalyticsProducts, fetchStores } from "@/api"
 import { useDashboard } from "@/composables/useDashboard"
 import { compactRange, currency, number, ratio } from "@/lib/format"
+import type { BusinessActionRow } from "@/lib/businessDecision"
 import type { ProductMetric } from "@/types"
 
-const { dashboard } = useDashboard()
+const { dashboard, currentStoreId } = useDashboard()
 const products = ref<ProductMetric[]>([])
 const fullLoading = ref(false)
 const fullError = ref("")
@@ -38,14 +38,6 @@ const detailSortDirection = ref<"asc" | "desc">("desc")
 const detailPage = ref(1)
 const detailPageSize = ref(20)
 const focusProducts = computed(() => products.value.slice(0, 8))
-const productTotals = computed(() => {
-  const items = focusProducts.value
-  return {
-    paidAmount: items.reduce((total, item) => total + item.paid_amount, 0),
-    visitors: items.reduce((total, item) => total + item.visitors, 0),
-    buyers: items.reduce((total, item) => total + item.buyers, 0),
-  }
-})
 const productCount = computed(() => products.value.length)
 const hasProducts = computed(() => productCount.value > 0)
 
@@ -169,19 +161,13 @@ const efficiencyOption = computed(() => ({
   series: [{ type: "scatter", symbolSize: (value: [number, number, number]) => Math.max(14, Math.min(50, Math.sqrt(value[2]) / 7)), data: focusProducts.value.map((item) => [item.visitors, item.visitors ? item.buyers / item.visitors * 100 : 0, item.paid_amount, productLabel(item.product_name, 14)]) }],
 }))
 
-const seriesItems = computed(() => {
-  const grouped = new Map<string, number>()
-  for (const item of products.value) grouped.set(item.series || "未分类", (grouped.get(item.series || "未分类") ?? 0) + item.paid_amount)
-  return [...grouped.entries()].sort((left, right) => right[1] - left[1]).slice(0, 8)
-})
-
 async function loadFullProducts(): Promise<void> {
   if (!dashboard.value) return
   fullLoading.value = true
   fullError.value = ""
   try {
     const stores = await fetchStores()
-    products.value = await fetchAnalyticsProducts(dashboard.value.range_start, dashboard.value.range_end, stores[0]?.store_id)
+    products.value = await fetchAnalyticsProducts(dashboard.value.range_start, dashboard.value.range_end, currentStoreId.value ?? stores[0]?.store_id)
   } catch (exc) {
     fullError.value = exc instanceof Error ? exc.message : "商品全量数据读取失败"
     products.value = dashboard.value?.top_products ?? []
@@ -218,21 +204,25 @@ watch(positioningBreakdown, (items) => {
   if (selectedSeries.value && !seriesBreakdown.value.some((item) => item.series === selectedSeries.value)) selectedSeries.value = ""
 })
 onMounted(() => { void loadFullProducts() })
-const seriesOption = computed(() => ({
-  color: ["#5b8def"],
-  tooltip: {
-    trigger: "axis",
-    axisPointer: { type: "shadow" },
-    formatter: (params: Array<{ axisValue: string; value: number }>) => {
-      const item = params[0]
-      return item ? `${item.axisValue}<br/>支付金额：${currency(Number(item.value))}` : ""
-    },
-  },
-  grid: { left: 90, right: 24, top: 20, bottom: 24 },
-  xAxis: { type: "value", axisLabel: { formatter: (value: number) => `¥${Math.round(value).toLocaleString("zh-CN")}` }, splitLine: { lineStyle: { color: "#edf1ef" } } },
-  yAxis: { type: "category", data: seriesItems.value.map((item) => item[0]).reverse() },
-  series: [{ type: "bar", barMaxWidth: 20, data: seriesItems.value.map((item) => item[1]).reverse() }],
-}))
+
+const productActionRows = computed<BusinessActionRow[]>(() => {
+  const rows: BusinessActionRow[] = []
+  const averageConversion = allProductConversion.value
+  const highTrafficLowConversion = productRows.value
+    .filter((item) => item.visitors >= allProductVisitors.value / Math.max(productCount.value, 1) && item.visitors > 50 && item.conversionRate <= averageConversion * .75 && item.conversionRate <= 100)
+    .sort((left, right) => right.visitors - left.visitors)[0]
+  if (highTrafficLowConversion) rows.push({ id: `low-cvr-${highTrafficLowConversion.product_id}`, priority: "P0", object: highTrafficLowConversion.product_name, issue: "高流量低转化", evidence: `${number(highTrafficLowConversion.visitors)} 访客，转化 ${ratio(highTrafficLowConversion.conversionRate)}，商品整体 ${ratio(averageConversion)}`, impact: currency(highTrafficLowConversion.paid_amount), action: "检查详情首屏卖点、价格权益、评价和可售状态，暂缓继续加大引流。", validation: "支付转化率、加购率、支付金额", window: "3-7 天", tone: "risk", to: { name: "product-analysis", query: { product_id: highTrafficLowConversion.product_id } } })
+  const topConcentration = topThreeShare.value
+  if (topConcentration >= 70 && products.value.length >= 3) rows.push({ id: "concentration", priority: "P1", object: "Top 3 商品", issue: "成交集中度过高", evidence: `Top 3 占全量商品支付 ${topConcentration.toFixed(1)}%`, impact: currency(topThreeAmount.value), action: "为第二梯队商品补充曝光和关联销售，降低单品依赖；先按系列拆解验证。", validation: "Top 3 占比、第二梯队支付金额", window: "7-14 天", tone: "warning" })
+  const miniProducts = products.value.filter((item) => /mini|尝鲜|试用/i.test(`${item.product_name} ${item.positioning} ${item.product_type}`))
+  if (miniProducts.length) {
+    const miniAmount = miniProducts.reduce((sum, item) => sum + item.paid_amount, 0)
+    rows.push({ id: "mini", priority: "P1", object: "MINI/尝鲜商品", issue: "需要验证试用到正装承接", evidence: `${miniProducts.length} 个商品，支付金额 ${currency(miniAmount)}`, impact: currency(miniAmount), action: "进入单品分析核对商品 ID、正装绑定、推广、问大家和库存覆盖。", validation: "正装绑定率、正装首购/复购", window: "7-30 天", tone: "opportunity", to: { name: "product-analysis", query: { product_id: miniProducts[0].product_id } } })
+  }
+  const noTraffic = productRows.value.filter((item) => item.paid_amount > 0 && item.visitors === 0).sort((left, right) => right.paid_amount - left.paid_amount)[0]
+  if (noTraffic) rows.push({ id: `quality-${noTraffic.product_id}`, priority: "P0", object: noTraffic.product_name, issue: "支付金额存在但商品访客为零", evidence: `支付 ${currency(noTraffic.paid_amount)}，访客 0`, impact: currency(noTraffic.paid_amount), action: "核对商品日报字段与统计口径，不把异常数据用于转化判断。", validation: "商品访客、买家和日报原始记录", window: "1 天", tone: "risk", to: { name: "product-analysis", query: { product_id: noTraffic.product_id } } })
+  return rows.slice(0, 4)
+})
 
 function productLabel(value: string, max = 22): string {
   return value.length > max ? `${value.slice(0, max)}…` : value
@@ -255,9 +245,9 @@ function productLabel(value: string, max = 22): string {
 
     <section class="metrics-grid product-metrics">
       <MetricCard label="全量商品支付金额" :value="hasProducts ? currency(topProductsTotal) : '暂无'" :detail="`${productCount} 个商品全量汇总`" :icon="CircleDollarSign" tone="teal" />
-      <MetricCard label="全量商品访客" :value="hasProducts ? number(products.reduce((sum, item) => sum + item.visitors, 0)) : '暂无'" detail="商品日报访客加总" :icon="Eye" tone="blue" />
-      <MetricCard label="全量支付买家" :value="hasProducts ? number(products.reduce((sum, item) => sum + item.buyers, 0)) : '暂无'" detail="商品日报买家加总" :icon="ShoppingCart" tone="amber" />
-      <MetricCard label="Top 8 转化率" :value="hasProducts ? ratio(productConversionRate) : '暂无'" detail="重点商品支付买家 / 访客" :icon="BadgePercent" tone="coral" />
+      <MetricCard label="商品访客人次" :value="hasProducts ? number(products.reduce((sum, item) => sum + item.visitors, 0)) : '暂无'" detail="商品日报逐商品加总，非全店去重 UV" :icon="Eye" tone="blue" />
+      <MetricCard label="商品支付买家人次" :value="hasProducts ? number(products.reduce((sum, item) => sum + item.buyers, 0)) : '暂无'" detail="商品日报逐商品加总，跨商品可能重复" :icon="ShoppingCart" tone="amber" />
+      <MetricCard label="商品整体转化" :value="hasProducts ? ratio(allProductConversion) : '暂无'" detail="有效商品买家人次 / 访客人次" :icon="BadgePercent" tone="coral" />
     </section>
 
     <section class="panel product-hierarchy-panel">
@@ -294,9 +284,9 @@ function productLabel(value: string, max = 22): string {
 
     <section class="product-analysis-grid">
       <article class="panel product-contribution-panel">
-        <div class="panel-heading"><div><p>成交贡献</p><h2>Top 8 商品支付金额</h2></div><span class="panel-action">横向比较</span></div>
-        <ProductContributionChart v-if="hasProducts" :items="focusProducts" />
-        <EmptyState v-else title="暂无商品贡献图" detail="所选范围没有已入库的商品排行数据。" />
+        <div class="panel-heading"><div><p>商品效率</p><h2>访客规模、转化率与成交</h2></div><span class="panel-action">气泡大小代表支付金额</span></div>
+        <BusinessChart v-if="hasProducts" :option="efficiencyOption" ariaLabel="商品访客转化率和成交金额气泡图" :height="330" />
+        <EmptyState v-else title="暂无商品效率图" detail="所选范围没有已入库的商品排行数据。" />
       </article>
 
       <article class="panel product-diagnostic-panel">
@@ -310,10 +300,7 @@ function productLabel(value: string, max = 22): string {
       </article>
     </section>
 
-    <section class="decision-chart-grid">
-      <article class="panel"><div class="panel-heading"><div><p>商品效率</p><h2>访客规模、转化率与成交</h2></div><span class="panel-action">气泡大小代表成交金额</span></div><BusinessChart v-if="hasProducts" :option="efficiencyOption" ariaLabel="商品访客转化率和成交金额气泡图" :height="330" /></article>
-      <article class="panel"><div class="panel-heading"><div><p>系列贡献</p><h2>重点商品系列支付金额</h2></div><span class="panel-action">商品档案分类</span></div><BusinessChart v-if="seriesItems.length" :option="seriesOption" ariaLabel="商品系列支付金额贡献图" :height="330" /></article>
-    </section>
+    <BusinessActionTable :rows="productActionRows" eyebrow="商品决策" title="需要下钻的商品对象" note="流量承接、集中度与数据质量" />
 
     <section class="panel product-detail-panel">
       <div class="panel-heading product-detail-heading"><div><p>商品排名</p><h2>全量商品明细</h2></div><span class="panel-action">共 {{ productCount }} 个 · 当前按{{ sortLabel(detailSortKey) }}{{ detailSortDirection === "desc" ? "降序" : "升序" }}</span></div>

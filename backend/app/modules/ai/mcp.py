@@ -106,6 +106,11 @@ class CommerceMCPService:
             input_schema={"type": "object", "properties": {"store_id": {"type": "integer"}, "start_date": {"type": "string", "format": "date"}, "end_date": {"type": "string", "format": "date"}}},
         ),
         MCPToolDescriptor(
+            name="customers.get_diagnosis",
+            description="返回客户三段人群、总支付与老客差额推导的首次购买指标、客单结构和分类对账差异。",
+            input_schema={"type": "object", "properties": {"store_id": {"type": "integer"}, "start_date": {"type": "string", "format": "date"}, "end_date": {"type": "string", "format": "date"}}},
+        ),
+        MCPToolDescriptor(
             name="utry.get_repurchase_diagnosis",
             description="返回 U先最新回购快照、按日趋势、商品贡献、正装绑定与回购权益配置；滚动窗口不跨日累加。",
             input_schema={"type": "object", "properties": {"store_id": {"type": "integer"}, "start_date": {"type": "string", "format": "date"}, "end_date": {"type": "string", "format": "date"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}},
@@ -223,6 +228,8 @@ class CommerceMCPService:
             return self.products_get_structure_profile(arguments)
         if tool == "customer_service.get_diagnosis":
             return self.customer_service_get_diagnosis(arguments)
+        if tool == "customers.get_diagnosis":
+            return self.customers_get_diagnosis(arguments)
         if tool == "utry.get_repurchase_diagnosis":
             return self.utry_get_repurchase_diagnosis(arguments)
         if tool == "reviews.get_diagnosis":
@@ -1457,6 +1464,87 @@ class CommerceMCPService:
                 ),
             ],
             provenance={"snapshot_day": latest_day, "comparison_day": previous_day, "aggregation": "latest_day_full_population"},
+            warnings=list(dict.fromkeys(warnings)),
+        )
+
+    def customers_get_diagnosis(self, arguments: dict[str, Any]) -> MCPEnvelope:
+        """Return reconciled customer lifecycle metrics from one shared derivation layer."""
+        source = self.analytics._source_for_store(arguments.get("store_id"))
+        store_id = source._store_id
+        start_date, end_date = self._bounded_range(source, arguments, days=30)
+        period_days = (end_date - start_date).days + 1
+        previous_end = start_date - timedelta(days=1)
+        previous_start = previous_end - timedelta(days=period_days - 1)
+        getter = getattr(source, "get_analysis_snapshot", None)
+        if getter is None:
+            raise RuntimeError("客户诊断需要规范化本地分析数据源")
+        current = getter(start_date, end_date).customer
+        previous = getter(previous_start, previous_end).customer
+        current_metrics = {item.id: item for item in current.derived_metrics}
+        previous_metrics = {item.id: item for item in previous.derived_metrics}
+        coverage = self.query_service.coverage("customers", store_id, start_date, end_date)
+        previous_coverage = self.query_service.coverage("customers", store_id, previous_start, previous_end)
+        comparable = self.query_service._coverage_complete(coverage) and self.query_service._coverage_complete(previous_coverage)
+        comparisons: dict[str, dict[str, float | int | None]] = {}
+        metrics: list[MetricValue] = []
+        unit_labels = {"currency": "CNY", "count": "person", "percent": "percent", "ratio": "ratio"}
+        for metric_id, item in current_metrics.items():
+            current_value = _optional_number(item.value) if item.status == "available" else None
+            previous_item = previous_metrics.get(metric_id)
+            previous_value = _optional_number(previous_item.value) if previous_item and previous_item.status == "available" else None
+            delta = current_value - previous_value if comparable and current_value is not None and previous_value is not None else None
+            change_percent = delta / abs(previous_value) * 100 if delta is not None and previous_value not in (None, 0) else None
+            comparison = {"current": current_value, "previous": previous_value, "delta": delta, "change_percent": change_percent}
+            comparisons[metric_id] = comparison
+            metrics.append(MetricValue(
+                id=metric_id,
+                label=item.label,
+                value=current_value,
+                unit=unit_labels.get(item.unit, item.unit),
+                formula=item.formula,
+                comparison=comparison,
+                source="store_daily_overviews + store_daily_customer_overviews",
+            ))
+        warnings = [*self._coverage_warnings(coverage), *current.quality_warnings]
+        if not comparable:
+            warnings.append("当前周期或上一周期客户数据覆盖不完整，派生指标未计算涨跌幅。")
+        data = {
+            "current_range": [start_date.isoformat(), end_date.isoformat()],
+            "previous_range": [previous_start.isoformat(), previous_end.isoformat()],
+            "comparable": comparable,
+            "raw": {
+                "shop_customers": current.shop_customers,
+                "shop_customers_stat_date": current.shop_customers_stat_date.isoformat() if current.shop_customers_stat_date else None,
+                "new_visit_paid_buyers": current.new_customer_paid_buyers,
+                "new_visit_paid_amount": _number(current.new_customer_paid_amount),
+                "no_purchase_returners": current.no_purchase_returners,
+                "no_purchase_paid_buyers": current.no_purchase_buyers,
+                "repeat_paid_buyers": current.repeat_customers,
+                "repeat_paid_amount": _number(current.repeat_customer_paid_amount),
+            },
+            "derived_metrics": [item.model_dump(mode="json") for item in current.derived_metrics],
+            "comparisons": comparisons,
+            "segments": [item.model_dump(mode="json") for item in current.segments],
+            "daily": [item.model_dump(mode="json") for item in current.daily_metrics],
+            "quality_warnings": current.quality_warnings,
+            "semantics": {
+                "first_purchase": "总支付减去已购回访支付，包含新访成交和未购回访后的首次成交。",
+                "population": "区间人数为每日人数累计，不是手机号、地址或买家ID跨日去重人数。",
+                "causal_boundary": "客户结构变化是描述性证据，不能单独证明营销动作产生增量。",
+            },
+        }
+        return self._envelope(
+            tool="customers.get_diagnosis",
+            context=self._context(store_id, start_date, end_date),
+            status="partial" if coverage.missing_dates or coverage.missing_datasets or coverage.partial_datasets else "ok" if current.daily_metrics else "no_data",
+            data=data,
+            metrics=metrics,
+            coverage=coverage,
+            evidence=[
+                EvidenceRecord(dataset="店铺日概览", table="store_daily_overviews", date_range=[start_date.isoformat(), end_date.isoformat()], row_count=len(current.daily_metrics), note="提供总支付人数和总支付金额。", metric_ids=["buyers", "gmv"]),
+                EvidenceRecord(dataset="客户分析", table="store_daily_customer_overviews", date_range=[start_date.isoformat(), end_date.isoformat()], row_count=len(current.daily_metrics), note="提供新访、未购回访和已购回访分层；人数为日累计。", metric_ids=list(current_metrics)),
+            ],
+            provenance={"derivation": "analytics.derived_metrics.CUSTOMER_DERIVED_METRICS", "comparable": comparable},
             warnings=list(dict.fromkeys(warnings)),
         )
 

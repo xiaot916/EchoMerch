@@ -1108,6 +1108,7 @@ button:disabled {
 
 .content {
   display: grid;
+  align-content: start;
   gap: 18px;
   min-height: calc(100vh - 132px);
   max-width: 1680px;
@@ -1705,6 +1706,19 @@ button:disabled {
   font-size: 11px;
   line-height: 1.6;
 }
+
+.empty-state-action {
+  min-height: 34px;
+  border: 1px solid #16845b;
+  border-radius: 4px;
+  padding: 0 14px;
+  color: #fff;
+  background: #16845b;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.empty-state-action:hover { background: #0f704c; }
 
 .error-panel {
   justify-content: flex-start;
@@ -4443,22 +4457,22 @@ body {
 
 /* Date scope is a query header, not a decorative toolbar. */
 .business-context-bar {
-  align-items: stretch;
+  align-items: center;
   min-height: 88px;
   border-bottom: 1px solid #e2e7ed;
   padding: 14px 0;
   background: #f5f7fa;
 }
-.store-context { flex: 1 1 260px; min-width: 220px; }
+.store-context { height: auto; flex: 1 1 260px; align-self: center; min-width: 220px; }
 .store-context p { color: #8290a3; }.store-context strong { color: #1f3048; }.store-icon { border-color: #d9e2ed; color: #356ae6; background: #fff; }.readonly-badge { border-color: #d8e2f3; color: #5574aa; background: #f5f8ff; }
-.calendar-date-filter { display: grid; grid-template-columns: auto auto auto; align-items: center; gap: 9px; border: 1px solid #dce3eb; border-radius: 6px; padding: 8px 9px; background: #fff; }
+.calendar-date-filter { display: grid; height: auto; min-height: 0; align-self: center; grid-template-columns: auto auto auto; grid-auto-rows: max-content; align-items: center; gap: 9px; border: 1px solid #dce3eb; border-radius: 6px; padding: 8px 9px; background: #fff; }
 .context-query-heading { display: flex; min-width: 155px; align-items: center; gap: 8px; }.context-query-heading > svg { color: #5274c9; }.context-query-heading > div { display: grid; gap: 2px; }.context-query-heading strong { color: #304158; font-size: 12px; }.context-query-heading span { color: #8491a3; font-size: 10px; }.context-query-heading small { margin-left: 4px; color: #9aa5b3; font-size: 10px; white-space: nowrap; }
 .calendar-date-filter .range-segmented { flex: 0 0 auto; border-color: #dce3eb; border-radius: 4px; }.calendar-date-filter .range-segmented button { min-width: 42px; height: 32px; padding: 0 10px; color: #536174; }.calendar-date-filter .range-segmented button.active { color: #2f61cc; background: #eef3ff; box-shadow: inset 0 -2px #4b74da; }
-.calendar-date-filter .period-picker { justify-self: end; border-color: #dce3eb; border-radius: 4px; }.calendar-date-filter .period-label { min-width: 132px; }.calendar-date-filter .custom-range-fields { justify-self: end; }.calendar-date-filter .custom-range-fields input { color: #344054; color-scheme: light; background: #fff; }.calendar-date-filter .range-apply { color: #fff; border: 0; background: #356ae6; }.calendar-date-filter .range-apply:hover:not(:disabled) { background: #2858c9; }.calendar-date-filter .sync-badge { grid-column: 1 / -1; justify-self: end; min-height: auto; color: #356ae6; }
+.calendar-date-filter .period-picker { justify-self: end; border-color: #dce3eb; border-radius: 4px; }.calendar-date-filter .period-label { min-width: 132px; }.calendar-date-filter .custom-range-fields { justify-self: end; }.calendar-date-filter .custom-range-fields input { color: #344054; color-scheme: light; background: #fff; }.calendar-date-filter .range-apply { color: #fff; border: 0; background: #356ae6; }.calendar-date-filter .range-apply:hover:not(:disabled) { background: #2858c9; }.calendar-date-filter .sync-badge { justify-self: end; min-height: auto; color: #356ae6; white-space: nowrap; }
 .data-status-strip { display: grid; grid-template-columns: 1.25fr repeat(3, minmax(120px, .72fr)) auto; gap: 1px; border: 1px solid #dfe5ec; border-radius: 6px; overflow: hidden; background: #dfe5ec; }.data-status-main, .data-status-item, .data-status-source { min-height: 58px; padding: 11px 13px; background: #fff; }.data-status-main { display: flex; align-items: center; gap: 8px; }.data-status-main > svg { flex: 0 0 auto; color: #1c8a65; }.data-status-main.warning > svg { color: #bb741d; }.data-status-main div { display: grid; gap: 3px; }.data-status-main strong { color: #304158; font-size: 12px; }.data-status-main small { color: #8a96a5; font-size: 10px; }.data-status-item { display: grid; align-content: center; gap: 3px; }.data-status-item span { color: #8995a5; font-size: 10px; }.data-status-item strong { color: #2870ca; font-size: 12px; }.data-status-item small { color: #9aa5b3; font-size: 9px; }.data-status-item.is-muted strong { color: #b47426; }.data-status-source { display: flex; align-items: center; gap: 6px; color: #8a96a5; font-size: 10px; white-space: nowrap; }.data-status-source svg { color: #6d8fda; }
 
 @media (max-width: 1180px) {
-  .business-context-bar { align-items: stretch; justify-content: flex-start; flex-direction: column; gap: 12px; }.business-context-bar .store-context { width: 100%; flex: 0 0 auto; min-width: 0; }.calendar-date-filter { width: 100%; grid-template-columns: auto 1fr auto; }.context-query-heading { min-width: 190px; }.data-status-strip { grid-template-columns: 1.3fr repeat(3, 1fr); }.data-status-source { grid-column: 1 / -1; }
+  .business-context-bar { align-items: stretch; justify-content: flex-start; flex-direction: column; gap: 12px; }.business-context-bar .store-context { width: 100%; flex: 0 0 auto; align-self: stretch; min-width: 0; }.calendar-date-filter { width: 100%; align-self: stretch; grid-template-columns: auto 1fr auto; }.context-query-heading { min-width: 190px; }.data-status-strip { grid-template-columns: 1.3fr repeat(3, 1fr); }.data-status-source { grid-column: 1 / -1; }
 }
 @media (max-width: 900px) {
   .business-context-bar { min-height: auto; padding-block: 10px; }
@@ -4620,6 +4634,7 @@ body {
 
 .customer-service-hero { background: #f7fbf9; }
 .customer-service-status { display: inline-flex; align-items: center; gap: 8px; border: 1px solid #cce9dc; border-radius: 5px; padding: 10px 13px; color: #18835e; background: #ecf9f2; font-size: 11px; }
+.customer-service-range-loading { margin-top: 8px; color: #718078; font-size: 10px; text-align: center; }
 .customer-service-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .customer-service-analysis-grid { grid-template-columns: minmax(280px, .78fr) minmax(0, 1.42fr); }
 .service-funnel-list { display: grid; gap: 5px; margin-top: 17px; }

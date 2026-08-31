@@ -25,8 +25,10 @@ from app.modules.ai.schemas import (
     AIConversationListItem,
     PeriodReportRequest,
     PeriodReportResponse,
+    PageAIProfileDescriptor,
     SkillDescriptor,
 )
+from app.modules.ai.page_profiles import list_page_ai_profiles
 from app.modules.ai.service import AIAnalysisService
 
 
@@ -110,6 +112,13 @@ def list_ai_skills(
     principal: Principal = Depends(require_permission("analytics.read")),
 ):
     return service.list_skills()
+
+
+@router.get("/page-profiles", response_model=list[PageAIProfileDescriptor])
+def list_ai_page_profiles(
+    _: Principal = Depends(require_permission("analytics.read")),
+) -> list[PageAIProfileDescriptor]:
+    return [PageAIProfileDescriptor.model_validate(item.as_dict()) for item in list_page_ai_profiles()]
 
 
 @router.get("/mcp/tools", response_model=list[MCPToolDescriptor])

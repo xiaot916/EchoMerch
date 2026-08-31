@@ -1089,7 +1089,11 @@ class WarehouseStore:
         store_name: str,
         platform_store_id: str = "2200573698992",
         http_status: int = 200,
+        replace_year: int | None = None,
     ) -> WarehouseMetricIngestResult:
+        target_year = replace_year or business_day.year
+        if target_year < 2000 or target_year > 9999:
+            raise ValueError("replace_year must be a four-digit calendar year.")
         parsed = load_and_parse_activity_calendar(
             source_path,
             business_day,
@@ -1148,9 +1152,15 @@ class WarehouseStore:
                 f"""
                 delete from store_activity_calendar_events
                 where {q(STORE_ID)} = ?
+                  and {q(BUSINESS_DAY)} between ? and ?
                 """,
-                (store_id,),
+                (store_id, f"{target_year:04d}-01-01", f"{target_year:04d}-12-31"),
             )
+            if parsed.events:
+                conn.executemany(
+                    f"delete from store_activity_calendar_events where {q(STORE_ID)} = ? and {q(ACTIVITY_ID)} = ?",
+                    [(store_id, event.activity_id) for event in parsed.events],
+                )
             conn.executemany(
                 f"""
                 insert into store_activity_calendar_events (
@@ -1177,7 +1187,7 @@ class WarehouseStore:
                 [
                     (
                         store_id,
-                        event.business_day.isoformat(),
+                        f"{target_year:04d}-01-01",
                         event.activity_id,
                         event.activity_name,
                         event.activity_type,
@@ -1204,7 +1214,8 @@ class WarehouseStore:
             metric_count=len(parsed.events),
             warnings=[
                 "activity calendar rows are stored in store_activity_calendar_events",
-                "same-store activity calendar snapshot is replaced atomically before insert",
+                f"same-store activity calendar year {target_year} is replaced atomically before insert",
+                "business_day is the annual snapshot anchor; activity_start_time and activity_end_time retain the real schedule",
                 "missing activityId values are replaced with a deterministic generated id",
             ],
         )
@@ -2974,8 +2985,9 @@ class WarehouseStore:
                 ).fetchone()
                 if row is None or row["business_day"] is None:
                     return []
-                start_date = date.fromisoformat(str(row["business_day"]))
-                end_date = start_date
+                latest_year = date.fromisoformat(str(row["business_day"])).year
+                start_date = date(latest_year, 1, 1)
+                end_date = date(latest_year, 12, 31)
             elif start_date is None:
                 start_date = end_date
             elif end_date is None:

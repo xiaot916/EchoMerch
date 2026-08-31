@@ -7,14 +7,20 @@ import CustomerServiceTrendChart from "@/components/CustomerServiceTrendChart.vu
 import BusinessChart from "@/components/BusinessChart.vue"
 import MetricCard from "@/components/MetricCard.vue"
 import { useDashboard } from "@/composables/useDashboard"
-import { currency, number, ratio } from "@/lib/format"
+import { compactRange, currency, number, ratio, shiftIsoDate } from "@/lib/format"
 
-const { dashboard, ensureDashboard } = useDashboard()
+const { dashboard, ensureDashboard, startDate, endDate, currentStoreId, loadDashboard, loading } = useDashboard()
 const snapshot = computed(() => dashboard.value?.analysis?.customer_service ?? null)
 const daily = computed(() => dashboard.value?.analysis?.customer_service_daily ?? [])
 const recentDaily = computed(() => [...daily.value].reverse().slice(0, 7))
 const accounts = computed(() => dashboard.value?.analysis?.customer_service_accounts ?? [])
 const hasServiceData = computed(() => Boolean(snapshot.value && daily.value.length))
+const serviceCoverage = computed(() => dashboard.value?.coverage.find((item) => item.dataset === "客服概览") ?? null)
+const serviceCoverageLabel = computed(() => {
+  const coverage = serviceCoverage.value
+  if (!coverage?.first_date || !coverage.latest_date) return "当前店铺尚未形成客服数据覆盖记录。"
+  return `客服数据实际覆盖 ${compactRange(coverage.first_date, coverage.latest_date)}，当前筛选 ${compactRange(dashboard.value?.range_start || "", dashboard.value?.range_end || "")} 不在覆盖范围内。`
+})
 const bestAccountSales = computed(() => Math.max(...accounts.value.map((item) => item.sales_amount), 1))
 const rankedAccounts = computed(() => [...accounts.value].sort((left, right) => right.sales_amount - left.sales_amount))
 
@@ -71,6 +77,15 @@ function contributionWidth(value: number): string {
   return `${Math.max(3, Math.min(100, (value / bestAccountSales.value) * 100))}%`
 }
 
+async function showLatestServiceData(): Promise<void> {
+  const coverage = serviceCoverage.value
+  if (!coverage?.latest_date) return
+  const proposedStart = shiftIsoDate(coverage.latest_date, -6)
+  startDate.value = coverage.first_date && proposedStart < coverage.first_date ? coverage.first_date : proposedStart
+  endDate.value = coverage.latest_date
+  await loadDashboard(true, currentStoreId.value ?? undefined)
+}
+
 onMounted(() => { void ensureDashboard() })
 </script>
 
@@ -85,20 +100,20 @@ onMounted(() => { void ensureDashboard() })
       <div class="customer-service-status"><Headphones :size="20" /><span>{{ hasServiceData ? `${daily.length} 个客服统计日` : "当前范围暂无客服数据" }}</span></div>
     </section>
 
-    <section v-if="snapshot" class="metrics-grid customer-service-metrics">
+    <section v-if="hasServiceData && snapshot" class="metrics-grid customer-service-metrics">
       <MetricCard label="客服销售额" :value="currency(snapshot.sales_amount)" detail="客服报表归因成交" :icon="CircleDollarSign" tone="teal" />
       <MetricCard label="客服净销售额" :value="currency(snapshot.net_sales_amount)" :detail="`成功退款 ${currency(snapshot.refund_amount)}`" :icon="BadgePercent" tone="blue" />
       <MetricCard label="客服成交占比" :value="ratio(snapshot.sales_ratio)" detail="客服销售额 / 店铺销售口径" :icon="MessageCircleMore" tone="blue" />
       <MetricCard label="平均响应" :value="`${snapshot.avg_reply_seconds.toFixed(1)} 秒`" :detail="`满意率 ${ratio(snapshot.satisfaction_rate)}`" :icon="Timer" tone="teal" />
     </section>
 
-    <section v-if="snapshot" class="panel service-overview-trend-panel">
+    <section v-if="hasServiceData && snapshot" class="panel service-overview-trend-panel">
       <div class="panel-heading"><div><p>多指标趋势</p><h2>销售、咨询、响应与满意率</h2></div><span class="panel-action">{{ daily.length }} 个统计日</span></div>
       <CustomerServiceTrendChart v-if="daily.length" :metrics="daily" />
       <EmptyState v-else title="暂无客服日级趋势" detail="当前日期范围没有客服概览入库记录。" :icon="Headphones" />
     </section>
 
-    <section v-if="snapshot" class="service-overview-support-grid">
+    <section v-if="hasServiceData && snapshot" class="service-overview-support-grid">
       <article class="panel customer-service-funnel-panel">
         <div class="panel-heading"><div><p>服务漏斗</p><h2>从咨询到客服成交</h2></div><MessageCircleMore :size="18" /></div>
         <div class="service-funnel-list">
@@ -118,7 +133,7 @@ onMounted(() => { void ensureDashboard() })
       </article>
     </section>
 
-    <section v-if="snapshot" class="panel customer-service-account-panel">
+    <section v-if="hasServiceData && snapshot" class="panel customer-service-account-panel">
       <div class="panel-heading"><div><p>人员贡献</p><h2>客服账号销售与接待效率</h2></div><ShieldCheck :size="18" /></div>
       <div v-if="accounts.length" class="customer-service-account-table">
         <div class="customer-service-account-row customer-service-account-head"><span>客服账号</span><span>销售额</span><span>净销售额</span><span>咨询</span><span>接待率</span><span>咨询成交率</span></div>
@@ -130,12 +145,20 @@ onMounted(() => { void ensureDashboard() })
       <EmptyState v-else title="暂无客服账号数据" detail="客服概览已入库，但当前日期范围没有账号维度明细。" :icon="Headphones" />
     </section>
 
-    <section v-if="snapshot" class="panel decision-wide-chart customer-service-scatter-panel">
+    <section v-if="hasServiceData && snapshot" class="panel decision-wide-chart customer-service-scatter-panel">
       <div class="panel-heading customer-service-scatter-heading"><div><p>人员效率分布</p><h2>账号接待率与咨询成交率</h2><span>横轴看接待覆盖，纵轴看接待后的成交效率</span></div><Target :size="18" /></div>
       <div class="customer-service-scatter-chart"><BusinessChart v-if="rankedAccounts.length" :option="performanceScatterOption" ariaLabel="客服账号接待率与咨询成交率散点图" :height="360" /></div>
       <p class="panel-footnote">气泡大小代表销售额；虚线是团队整体指标。用于定位“接待不足”或“接待后转化不足”的账号，不替代团队总盘。</p>
     </section>
 
-    <EmptyState v-if="!snapshot" title="暂无客服真实数据" detail="当前日期范围没有客服概览入库记录，页面不会用全店支付或访客数据替代。" :icon="Headphones" />
+    <EmptyState
+      v-if="!hasServiceData"
+      title="当前筛选范围没有客服数据"
+      :detail="serviceCoverageLabel"
+      :icon="Headphones"
+      action-label="查看最新 7 天客服数据"
+      @action="showLatestServiceData"
+    />
+    <div v-if="loading && !hasServiceData" class="customer-service-range-loading">正在切换到客服有效日期...</div>
   </template>
 </template>

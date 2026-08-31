@@ -3,10 +3,12 @@ import { computed, ref } from "vue"
 import { BarChart3, CircleDollarSign, Eye, LoaderCircle, Radio, Search, ShoppingBag, UsersRound } from "lucide-vue-next"
 
 import BusinessChart from "@/components/BusinessChart.vue"
+import BusinessActionTable from "@/components/BusinessActionTable.vue"
 import EmptyState from "@/components/EmptyState.vue"
 import MetricCard from "@/components/MetricCard.vue"
 import { useDashboard } from "@/composables/useDashboard"
 import { currency, number, ratio } from "@/lib/format"
+import type { BusinessActionRow } from "@/lib/businessDecision"
 import type { LiveTalentMetric } from "@/types"
 
 const { dashboard, loading } = useDashboard()
@@ -108,6 +110,31 @@ const talentDiagnosis = computed(() => {
   const coreText = core ? `“${core.talent_name}”贡献高但转化低于整体，应优先优化选品、价格或直播承接。` : "头部主播转化暂未出现明显短板。"
   return `${concentration}，Top 3 贡献 ${talentContributionTopThree.value.toFixed(2)}%。${focusText}${coreText}`
 })
+const shopWeightedClickRate = computed(() => {
+  const viewers = daily.value.reduce((sum, item) => sum + item.viewers, 0)
+  return viewers ? daily.value.reduce((sum, item) => sum + item.item_click_users, 0) / viewers * 100 : 0
+})
+const shopWeightedDealRate = computed(() => {
+  const clicks = daily.value.reduce((sum, item) => sum + item.item_click_users, 0)
+  return clicks ? daily.value.reduce((sum, item) => sum + item.buyers, 0) / clicks * 100 : 0
+})
+const shopViewClickRate = computed<number | null>(() => live.value?.viewers ? live.value.item_click_users / live.value.viewers * 100 : null)
+const shopClickDealRate = computed<number | null>(() => live.value?.item_click_users ? live.value.buyers / live.value.item_click_users * 100 : null)
+const shopOverallDealRate = computed<number | null>(() => live.value?.viewers ? live.value.buyers / live.value.viewers * 100 : null)
+const funnelRateLabel = (value: number | null): string => value === null ? "--" : ratio(value)
+const liveActionRows = computed<BusinessActionRow[]>(() => {
+  const rows: BusinessActionRow[] = []
+  const lowClickDay = daily.value.filter((item) => item.viewers >= 100 && item.view_click_rate < shopWeightedClickRate.value * .7).sort((left, right) => right.viewers - left.viewers)[0]
+  if (lowClickDay) rows.push({ id: `shop-click-${lowClickDay.stat_date}`, priority: "P0", object: `店播 ${lowClickDay.stat_date}`, issue: "观看规模高但商品点击承接弱", evidence: `${number(lowClickDay.viewers)} 观看，观看点击率 ${ratio(lowClickDay.view_click_rate)}`, impact: currency(lowClickDay.shop_paid_amount), action: "复盘商品露出、讲解顺序和利益点，优先调整前 30 分钟货盘。", validation: "观看点击率、商品点击人数", window: "下一场", tone: "risk" })
+  const lowDealDay = daily.value.filter((item) => item.item_click_users >= 30 && item.click_deal_rate < shopWeightedDealRate.value * .7).sort((left, right) => right.item_click_users - left.item_click_users)[0]
+  if (lowDealDay) rows.push({ id: `shop-deal-${lowDealDay.stat_date}`, priority: "P0", object: `店播 ${lowDealDay.stat_date}`, issue: "商品点击后成交承接弱", evidence: `${number(lowDealDay.item_click_users)} 点击，点击成交 ${ratio(lowDealDay.click_deal_rate)}`, impact: currency(lowDealDay.shop_paid_amount), action: "核对直播价、优惠规则、库存和客服承接，不继续单纯拉观看。", validation: "点击成交率、支付买家、客单价", window: "下一场", tone: "risk" })
+  if (talentContributionTopThree.value >= 60) rows.push({ id: "talent-concentration", priority: "P1", object: "达播 Top 3 主播", issue: "达播成交集中度较高", evidence: `Top 3 占达播成交 ${ratio(talentContributionTopThree.value)}`, impact: currency(talentRows.value.slice().sort((a, b) => b.paid_amount - a.paid_amount).slice(0, 3).reduce((sum, item) => sum + item.paid_amount, 0)), action: "保留头部合作，同时测试第二梯队主播，避免排期变化造成成交波动。", validation: "Top 3 占比、第二梯队单场产出", window: "2-4 周", tone: "warning" })
+  const coreTalent = talentRows.value.filter((item) => item.action_key === "core" || item.action_key === "optimize").sort((left, right) => right.paid_amount - left.paid_amount)[0]
+  if (coreTalent) rows.push({ id: `talent-optimize-${coreTalent.talent_id}`, priority: "P1", object: coreTalent.talent_name, issue: "贡献有规模但点击成交需提效", evidence: `${number(coreTalent.sessions)} 场，成交 ${currency(coreTalent.paid_amount)}，点击成交 ${ratio(coreTalent.click_deal_rate)}`, impact: currency(coreTalent.paid_amount), action: "复盘选品、价格和讲解脚本，下一场保持货盘可比后验证。", validation: "点击成交率、单场产出、支付买家", window: "下一场", tone: "warning" })
+  const scaleTalent = talentRows.value.filter((item) => item.action_key === "focus" || item.action_key === "expand").sort((left, right) => right.single_output - left.single_output)[0]
+  if (scaleTalent) rows.push({ id: `talent-scale-${scaleTalent.talent_id}`, priority: "P2", object: scaleTalent.talent_name, issue: "可增加场次验证", evidence: `${number(scaleTalent.sessions)} 场，单场 ${currency(scaleTalent.single_output)}，点击成交 ${ratio(scaleTalent.click_deal_rate)}`, impact: currency(scaleTalent.paid_amount), action: "增加一档合作场次，保持商品与价格可比，观察单场产出是否衰减。", validation: "边际单场产出、点击成交率", window: "1-2 周", tone: "opportunity" })
+  return rows.slice(0, 5)
+})
 
 function changeTalentPage(next: number): void {
   talentPage.value = Math.min(talentPageCount.value, Math.max(1, next))
@@ -144,8 +171,8 @@ const trendOption = computed(() => ({
 
 const funnelOption = computed(() => ({
   color: ["#a8d9c4", "#6bbd99", "#e2a447", "#5b8def"],
-  tooltip: { trigger: "item", valueFormatter: (value: number) => number(Number(value)) },
-  series: [{ type: "funnel", left: "8%", top: 18, bottom: 18, width: "84%", min: 0, max: Math.max(live.value?.viewers ?? 0, 1), minSize: "14%", maxSize: "100%", sort: "descending", gap: 3, label: { show: true, position: "inside", color: "#264235", fontSize: 11 }, data: live.value ? [
+  tooltip: { trigger: "item", formatter: (params: { name: string; value: number }) => `${params.name}<br/>${number(params.value)} 人` },
+  series: [{ type: "funnel", left: "5%", top: 18, bottom: 18, width: "90%", min: 0, max: Math.max(live.value?.viewers ?? 0, 1), minSize: "18%", maxSize: "100%", sort: "descending", gap: 4, label: { show: true, position: "inside", color: "#264235", fontSize: 11, lineHeight: 19, formatter: (params: { name: string; value: number }) => `${params.name}\n${number(params.value)} 人` }, data: live.value ? [
     { name: "店播观看", value: live.value.viewers },
     { name: "商品点击", value: live.value.item_click_users },
     { name: "店播成交", value: live.value.buyers },
@@ -169,7 +196,25 @@ const funnelOption = computed(() => ({
 
     <section class="decision-chart-grid">
       <article class="panel"><div class="panel-heading"><div><p>店播经营</p><h2>直播中成交与播后成交</h2></div><Radio :size="18" /></div><BusinessChart :option="trendOption" ariaLabel="店播直播中和播后成交趋势图" :height="330" /><p class="panel-footnote">店播成交金额来自直播概览；观看、点击、成交漏斗来自店播转化表，两个数据集按日期核对。</p></article>
-      <article class="panel"><div class="panel-heading"><div><p>店播漏斗</p><h2>观看到商品成交</h2></div><BarChart3 :size="18" /></div><BusinessChart :option="funnelOption" ariaLabel="店播观看商品点击成交漏斗" :height="330" /></article>
+      <article class="panel live-funnel-panel">
+        <div class="panel-heading"><div><p>店播漏斗</p><h2>观看到商品成交</h2></div><BarChart3 :size="18" /></div>
+        <div class="live-funnel-layout">
+          <BusinessChart :option="funnelOption" ariaLabel="店播观看商品点击成交漏斗及各阶段人数" :height="330" />
+          <div class="live-funnel-rates">
+            <div><span>观看 → 商品点击</span><strong>{{ funnelRateLabel(shopViewClickRate) }}</strong><small>{{ number(live.item_click_users) }} 点击 / {{ number(live.viewers) }} 观看</small></div>
+            <div><span>商品点击 → 成交</span><strong>{{ funnelRateLabel(shopClickDealRate) }}</strong><small>{{ number(live.buyers) }} 买家 / {{ number(live.item_click_users) }} 点击</small></div>
+            <div class="overall"><span>观看 → 成交</span><strong>{{ funnelRateLabel(shopOverallDealRate) }}</strong><small>{{ number(live.buyers) }} 买家 / {{ number(live.viewers) }} 观看</small></div>
+          </div>
+        </div>
+        <p class="panel-footnote">观看点击率衡量商品露出承接，点击成交率衡量价格、货盘和信任承接；整体成交率为成交买家 / 店播观看人数。</p>
+      </article>
+    </section>
+
+    <section class="panel live-daily-panel">
+      <div class="panel-heading"><div><p>店播对象</p><h2>逐日漏斗与成交明细</h2></div><span class="panel-action">{{ number(daily.length) }} 个店播日</span></div>
+      <div v-if="daily.length" class="live-daily-table-wrap"><table class="live-daily-table"><thead><tr><th>日期</th><th>观看人数</th><th>商品点击</th><th>观看点击率</th><th>支付买家</th><th>点击成交率</th><th>直播中成交</th><th>播后成交</th><th>店播成交</th><th>买家产出</th></tr></thead><tbody><tr v-for="item in daily.slice().reverse()" :key="item.stat_date"><td><strong>{{ item.stat_date }}</strong></td><td>{{ number(item.viewers) }}</td><td>{{ number(item.item_click_users) }}</td><td>{{ ratio(item.view_click_rate) }}</td><td>{{ number(item.buyers) }}</td><td>{{ ratio(item.click_deal_rate) }}</td><td>{{ currency(item.live_during_paid_amount) }}</td><td>{{ currency(item.post_paid_amount) }}</td><td><em>{{ currency(item.shop_paid_amount) }}</em></td><td>{{ currency(item.paid_amount_per_buyer) }}</td></tr></tbody></table></div>
+      <EmptyState v-else title="暂无店播日明细" detail="当前范围没有店播转化日报。" />
+      <p class="panel-footnote">店播按日期下钻；观看、点击、买家来自店播转化表，直播中、播后和店播成交来自直播概览，页面不把达播主播成交混入该漏斗。</p>
     </section>
 
     <section class="panel talent-diagnostic-panel">
@@ -208,7 +253,35 @@ const funnelOption = computed(() => ({
       </div>
       <p class="panel-footnote">达播成交来自合作主播日报。贡献占比以当前日期范围全部主播成交为分母；“合作建议”根据贡献规模、单场产出、点击成交率和合作场次数分层，仅用于运营排查，不代表平台官方评级。当前没有佣金、坑位费、投流费和退款成本字段，因此这里判断的是成交效率，不等同主播利润率。</p>
     </section>
+
+    <BusinessActionTable :rows="liveActionRows" eyebrow="直播动作" title="店播日期与达播主播行动" note="店播、达播分别验证" />
   </template>
   <section v-else-if="loading" class="loading-panel"><LoaderCircle :size="26" class="spinning" /><span>正在读取直播分析</span></section>
   <EmptyState v-else title="暂无直播分析数据" detail="当前日期范围没有直播概览或店播转化记录。" :icon="Radio" />
 </template>
+
+<style scoped>
+.live-daily-panel { margin-top: 16px; overflow: hidden; }
+.live-funnel-layout { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(170px, .75fr); align-items: center; gap: 14px; }
+.live-funnel-layout > * { min-width: 0; }
+.live-funnel-rates { display: grid; gap: 0; border-left: 1px solid #e4ebe7; padding-left: 16px; }
+.live-funnel-rates > div { display: grid; gap: 5px; border-bottom: 1px solid #edf2ef; padding: 16px 0; }
+.live-funnel-rates > div:last-child { border-bottom: 0; }
+.live-funnel-rates span { color: #74867c; font-size: 10px; }
+.live-funnel-rates strong { color: #16845b; font-size: 22px; font-weight: 740; line-height: 1.15; }
+.live-funnel-rates small { color: #94a098; font-size: 9px; line-height: 1.5; }
+.live-funnel-rates .overall strong { color: #d3922c; }
+.live-daily-table-wrap { overflow-x: auto; margin-top: 12px; padding: 0 16px; }
+.live-daily-table { width: 100%; min-width: 1050px; border-collapse: collapse; table-layout: fixed; }.live-daily-table th,.live-daily-table td { border-bottom: 1px solid #edf2ef; padding: 10px 8px; color: #66776e; font-size: 10px; text-align: right; }.live-daily-table th { color: #8c9991; background: #f8faf9; font-size: 9px; font-weight: 650; }.live-daily-table th:first-child,.live-daily-table td:first-child { width: 105px; text-align: left; }.live-daily-table td strong { color: #40564a; }.live-daily-table td em { color: #16845b; font-style: normal; font-weight: 700; }
+@media (max-width: 760px) {
+  .live-funnel-layout { grid-template-columns: 1fr; }
+  .live-funnel-rates { grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid #e4ebe7; border-left: 0; padding-top: 8px; padding-left: 0; }
+  .live-funnel-rates > div { border-right: 1px solid #edf2ef; border-bottom: 0; padding: 10px; }
+  .live-funnel-rates > div:last-child { border-right: 0; }
+  .live-funnel-rates strong { font-size: 18px; }
+}
+@media (max-width: 480px) {
+  .live-funnel-rates { grid-template-columns: 1fr; }
+  .live-funnel-rates > div { border-right: 0; border-bottom: 1px solid #edf2ef; padding: 11px 0; }
+}
+</style>

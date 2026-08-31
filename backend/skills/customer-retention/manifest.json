@@ -2,9 +2,9 @@
   "name": "customer-retention",
   "display_name": "客户复购诊断",
   "description": "分析新客、未购回访和老客复购结构，给出分层运营和召回动作。",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "enabled": true,
   "domains": ["customer"],
   "keywords": ["客户", "新客", "老客", "复购", "回访", "召回", "留存"],
-  "workflow": [{"tool": "data.query", "description": "汇总客户分层成交结构", "arguments": {"dataset": "customers", "measures": ["new_paid_buyers", "repeat_buyers", "no_purchase_buyers"]}}]
+  "workflow": [{"tool": "customers.get_diagnosis", "description": "汇总客户三段人群，并用总支付减老客支付推导首次购买人数、金额、占比和客单"}]
 }

@@ -7,6 +7,10 @@ from pydantic import BaseModel, Field
 
 
 AnalysisStatus = Literal["ok", "partial", "no_data", "error"]
+AIDomain = Literal[
+    "auto", "overview", "traffic", "promotion", "market", "inventory", "budget", "planning",
+    "product", "customer", "customer-service", "content", "live", "campaign", "reviews",
+]
 
 
 class AnalysisContext(BaseModel):
@@ -93,6 +97,9 @@ class DiagnosisFinding(BaseModel):
     title: str
     detail: str
     metric_ids: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+    impact: str = ""
+    confidence: Literal["high", "medium", "low"] = "medium"
 
 
 class RecommendedAction(BaseModel):
@@ -103,6 +110,12 @@ class RecommendedAction(BaseModel):
     validation: str = ""
     observation_window: str = ""
     expected_impact: str = ""
+    object_type: str = ""
+    object_id: str = ""
+    problem: str = ""
+    verify_metric: str = ""
+    stop_condition: str = ""
+    confidence: Literal["high", "medium", "low"] = "medium"
 
 
 class ArtifactSpec(BaseModel):
@@ -138,12 +151,26 @@ class AnalysisRequest(BaseModel):
     store_id: int | None = Field(default=None, ge=1)
     start_date: date | None = None
     end_date: date | None = None
-    domain: Literal[
-        "auto", "overview", "traffic", "promotion", "market", "inventory", "budget", "planning",
-        "product", "customer", "customer-service", "content", "live", "campaign", "reviews",
-    ] = "auto"
+    domain: AIDomain = "auto"
+    page_key: str | None = Field(default=None, min_length=1, max_length=80)
     page_context: dict[str, Any] = Field(default_factory=dict)
     use_model: bool = True
+
+
+class PageAIProfileDescriptor(BaseModel):
+    key: str
+    title: str
+    section: str
+    domain: AIDomain
+    primary_skill: str
+    goal: str
+    diagnostic_question: str
+    data_domains: list[str] = Field(default_factory=list)
+    datasets: list[str] = Field(default_factory=list)
+    recommended_questions: list[str] = Field(default_factory=list)
+    focus_dimensions: list[str] = Field(default_factory=list)
+    decision_lens: dict[str, str] = Field(default_factory=dict)
+    quality_checks: list[str] = Field(default_factory=list)
 
 
 class PeriodReportRequest(BaseModel):

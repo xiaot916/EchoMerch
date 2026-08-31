@@ -221,6 +221,10 @@ def build_child_command(
         # The worker defaults to overview sections only. Daily completeness
         # also owns the channel table, so request it explicitly.
         command.extend(["--sections", "core,asset,repurchase,acquisition,channel"])
+    if spec.name == "sycm_activity_calendar":
+        # The endpoint returns an annual calendar. Daily scheduling refreshes
+        # only the current business year; prior years stay persisted.
+        command.extend(["--years", str(day.year)])
     if refresh_existing or rolling_promotion or spec.name in ALWAYS_REFRESH_DATASET_NAMES:
         command.append("--refresh-existing")
     return command
