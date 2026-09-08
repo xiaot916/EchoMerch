@@ -148,6 +148,15 @@ Cookies are not written to SQLite, JSON logs, response artifacts, or `.env`.
 When the platform session expires, log in again through the same browser and
 rerun the worker.
 
+The collector reuses an already-open matching platform tab before creating a
+new one. Jobs that share the same SPA (for example SYCM or Alimama promotion)
+are serialized while independent platforms can still run in parallel. This
+prevents one worker from navigating another worker's listener and avoids
+accumulating temporary `about:blank` tabs.
+
+The frontend keeps chart core and chart-type modules in separate lazy-loaded
+chunks, so non-chart pages do not need to download the full chart bundle.
+
 ### PZ Brand Zone
 
 The legacy `get_brand_zone_data` worker is available as a separate PZ
@@ -311,7 +320,7 @@ python -m uvicorn app.main:app --app-dir backend --reload --host 0.0.0.0 --port 
 ```powershell
 cd frontend
 npm install
-npm run dev -- --host 0.0.0.0 --port 5174
+npm run dev -- --host 0.0.0.0 --port 9568
 ```
 
 Both development servers listen on `0.0.0.0` so other devices on the same LAN
@@ -334,15 +343,15 @@ phone would interpret `127.0.0.1` as the phone itself.
 When the computer and phone are on the same LAN, open the frontend through the
 computer's LAN IPv4 address, for example:
 
-- `http://172.16.12.62:5174/contracts`
-- `http://172.16.12.62:5174/imports`
-- `http://172.16.12.62:5174/operations`
+- `http://172.16.12.62:9568/contracts`
+- `http://172.16.12.62:9568/imports`
+- `http://172.16.12.62:9568/operations`
 
 Useful local pages:
 
-- `http://127.0.0.1:5173/contracts`
-- `http://127.0.0.1:5173/imports`
-- `http://127.0.0.1:5173/operations`
+- `http://127.0.0.1:9568/contracts`
+- `http://127.0.0.1:9568/imports`
+- `http://127.0.0.1:9568/operations`
 
 Useful warehouse APIs:
 

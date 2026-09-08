@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from app.api.v1.routes import collection as collection_routes
 from app.core.config import settings
 from app.integrations import collection_browser
-from app.core.local_database import LocalDatabase
+from app.core.local_database import LocalDatabase, PROMOTION_ADGROUP_COLUMNS, q
 from app.main import create_app
 from app.modules.access.service import AccessControlStore
 from app.modules.collection.registry import COLLECTION_DATASET_BY_KEY, COLLECTION_DATASET_KEYS
@@ -224,6 +224,105 @@ def test_new_customer_discount_placeholder_is_partial_not_complete(tmp_path: Pat
     assert coverage.error_message == "接口已返回店铺级数据，但活动级新客指标为空，尚未形成完整日报。"
 
 
+def test_customer_overview_placeholder_is_partial_not_complete(tmp_path: Path) -> None:
+    database_path = tmp_path / "customer-overview-coverage.sqlite3"
+    database = LocalDatabase(database_path)
+    database.initialize_schema()
+    CrawlRunStore(database_path).ensure_store_reference(
+        store_id=1,
+        store_name="Store 1",
+        platform_store_id="p-1",
+    )
+    with database.connect(initialize=True) as conn:
+        conn.execute(
+            'insert into store_daily_customer_overviews ("店铺ID", "业务日期") values (?, ?)',
+            (1, "2026-08-20"),
+        )
+        conn.commit()
+        coverage = CollectionService(database_path)._dataset_coverage(
+            conn,
+            COLLECTION_DATASET_BY_KEY["sycm_customer_overviews"],
+            date(2026, 8, 20),
+        )
+
+    assert coverage.status == "partial"
+    assert coverage.present_tables == 0
+    assert coverage.tables[0].raw_row_count == 1
+    assert coverage.tables[0].status == "partial"
+    assert coverage.error_message == "客户概览接口已返回占位行，但新访、回访或复购核心指标为空，尚未形成完整日报。"
+
+
+def test_successful_empty_bidword_report_does_not_create_a_gap(tmp_path: Path) -> None:
+    database_path = tmp_path / "promotion-empty-bidword.sqlite3"
+    database = LocalDatabase(database_path)
+    database.initialize_schema()
+    runs = CrawlRunStore(database_path)
+    runs.ensure_store_reference(store_id=1, store_name="Store 1", platform_store_id="p-1")
+    day = date(2026, 9, 4)
+    with database.connect(initialize=True) as conn:
+        conn.execute(
+            f'''insert into store_daily_promotion_adgroups (
+                {", ".join(q(column) for column in PROMOTION_ADGROUP_COLUMNS[:9])}
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (1, day.isoformat(), "万相台", "c1", "计划", "a1", "单元", "p1", "商品"),
+        )
+        conn.commit()
+    for task_type, metric_count in (("alimama_adgroups", 13), ("alimama_bidwords", 0)):
+        run_id = runs.create_run(
+            store_id=1, task_type=task_type, start_day=day, end_day=day,
+            mode="refresh", planned_days=1, log_file=tmp_path / f"{task_type}.jsonl",
+        )
+        runs.record_day(
+            run_id=run_id, store_id=1, business_day=day,
+            status="ingested", metric_count=metric_count,
+        )
+        runs.finish_run(
+            run_id=run_id, status="completed", success_days=1,
+            skipped_days=0, failed_days=0,
+        )
+
+    with database.connect() as conn:
+        coverage = CollectionService(database_path)._dataset_coverage(
+            conn,
+            COLLECTION_DATASET_BY_KEY["alimama_adgroup_bidwords"],
+            day,
+        )
+
+    assert coverage.status == "complete"
+    assert coverage.present_tables == 2
+    assert coverage.tables[1].status == "no_data"
+    assert coverage.gap_count == 0
+
+
+def test_coverage_marks_history_gap_even_when_target_day_has_a_row(tmp_path: Path) -> None:
+    database_path = tmp_path / "history-gap.sqlite3"
+    database = LocalDatabase(database_path)
+    database.initialize_schema()
+    CrawlRunStore(database_path).ensure_store_reference(
+        store_id=1,
+        store_name="Store 1",
+        platform_store_id="p-1",
+    )
+    with database.connect(initialize=True) as conn:
+        for business_day in ("2026-08-30", "2026-09-07"):
+            conn.execute(
+                'insert into store_daily_overviews ("店铺ID", "业务日期") values (?, ?)',
+                (1, business_day),
+            )
+        conn.commit()
+        coverage = CollectionService(database_path)._dataset_coverage(
+            conn,
+            COLLECTION_DATASET_BY_KEY["sycm_overviews"],
+            date(2026, 9, 7),
+        )
+
+    assert coverage.status == "partial"
+    assert coverage.backfill_start_date == "2026-08-31"
+    assert coverage.contiguous_latest_date == "2026-08-30"
+    assert coverage.gap_count == 7
+    assert coverage.missing_dates[-1] == "2026-09-06"
+
+
 def test_complete_dataset_does_not_surface_an_older_task_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -254,6 +353,38 @@ def test_complete_dataset_does_not_surface_an_older_task_error(
 
     assert coverage.status == "complete"
     assert coverage.error_message is None
+
+
+def test_qps_limited_item_ranking_is_failed_even_when_an_older_snapshot_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = CollectionService(tmp_path / "collection.sqlite3")
+    dataset = COLLECTION_DATASET_BY_KEY["sycm_item_rankings"]
+    day = date(2026, 9, 7)
+    monkeypatch.setattr(
+        service,
+        "_table_coverage_for_dataset",
+        lambda _conn, _dataset, table, _day: DatasetTableCoverage(
+            table=table, present=True, row_count=126, latest_date=day.isoformat()
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_latest_task_attempts",
+        lambda *_args: [{
+            "task_type": "sycm_item_rankings",
+            "day_status": "ingest_failed",
+            "run_status": "completed_with_errors",
+            "started_at": "2026-09-08T13:20:00+08:00",
+            "error_message": "page 4 fetch failed: HTTP 200, code 1800, message QPS exceeded",
+        }],
+    )
+
+    coverage = service._dataset_coverage(object(), dataset, day)
+
+    assert coverage.status == "failed"
+    assert coverage.error_message == "page 4 fetch failed: HTTP 200, code 1800, message QPS exceeded"
 
 
 def test_legacy_bybt_error_is_explained_in_operator_language(

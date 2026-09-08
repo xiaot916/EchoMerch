@@ -227,7 +227,7 @@ function statusDetail(item: DatasetCoverage): string {
   const coveragePrefix = item.collection_mode === "coverage_snapshot" ? "覆盖快照 · " : ""
   if (item.status === "complete") return item.collection_mode === "coverage_snapshot" ? `${coveragePrefix}${number(item.row_count)} 行已覆盖` : `${number(item.row_count)} 行已入库`
   if (item.status === "no_data") return item.collection_mode === "coverage_snapshot" ? "覆盖完成 · 当天没有在线商品" : "接口已返回，目标日期无业务数据"
-  if (item.status === "partial") return item.error_message || `${coveragePrefix}${item.present_tables}/${item.expected_tables} 张表已到达`
+  if (item.status === "partial") return item.error_message || (item.gap_count ? `近期开口 ${item.gap_count} 天，从 ${item.backfill_start_date || "--"} 开始补采` : `${coveragePrefix}${item.present_tables}/${item.expected_tables} 张表已到达`)
   if (item.status === "failed") return [`目标日 ${selectedDay.value || "当前日期"} 未入库`, item.error_message || "最近一次采集失败"].join("；")
   if (item.status === "collecting") return "后台 Worker 正在处理"
   return item.error_message || (item.latest_date ? `最近数据停在 ${item.latest_date}；目标日 ${selectedDay.value || "当前日期"} 尚未入库` : "尚未采集到数据")

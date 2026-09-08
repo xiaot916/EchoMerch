@@ -17,7 +17,7 @@ def active_daily_batch(database_path: Path) -> str | None:
     with database.connect() as conn:
         row = conn.execute(
             "select batch_id from collection_batches where status = 'running' "
-            "order by datetime(started_at) desc limit 1"
+            "order by started_at desc limit 1"
         ).fetchone()
     return str(row[0]) if row else None
 
@@ -37,7 +37,7 @@ def active_feedback_run(database_path: Path) -> tuple[str, str] | None:
                 continue
             row = conn.execute(
                 f"select * from {table} where status in ('queued', 'running') "
-                "order by datetime(started_at) desc limit 1"
+                "order by started_at desc limit 1"
             ).fetchone()
             if row:
                 if _reclaim_stale_feedback_run(conn, table, row):

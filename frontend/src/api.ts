@@ -61,6 +61,14 @@ import type {
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "")
 
+const GET_CACHE_TTL_MS = 1500
+const getCache = new Map<string, { expiresAt: number; value: unknown }>()
+const getInFlight = new Map<string, Promise<unknown>>()
+
+function invalidateGetCache(): void {
+  getCache.clear()
+}
+
 function numeric(value: string | number): number {
   return typeof value === "number" ? value : Number(value)
 }
@@ -359,6 +367,17 @@ function normalizeComparison(value: DashboardResponse["comparison"]["paid_amount
 }
 
 async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const now = Date.now()
+  const cached = getCache.get(path)
+  if (cached && cached.expiresAt > now) return cached.value as T
+  // De-duplicate identical concurrent reads (common when dashboard widgets
+  // mount together) without sharing AbortSignals between callers.
+  const pending = getInFlight.get(path)
+  // Do not let one caller's AbortController cancel a request another caller
+  // is waiting for. Signal-bearing reads remain independent; the short cache
+  // still prevents immediate duplicate reloads after the first response.
+  if (pending && !signal) return pending as Promise<T>
+  const request = (async () => {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: { Accept: "application/json" },
     signal,
@@ -370,7 +389,12 @@ async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
     throw new Error(payload?.detail || `请求失败：${response.status}`)
   }
 
-  return response.json() as Promise<T>
+    const value = await response.json() as T
+    getCache.set(path, { expiresAt: Date.now() + GET_CACHE_TTL_MS, value })
+    return value
+  })()
+  if (!signal) getInFlight.set(path, request)
+  try { return await request } finally { if (!signal) getInFlight.delete(path) }
 }
 
 async function apiPost<T>(path: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
@@ -390,7 +414,8 @@ async function apiPost<T>(path: string, body: Record<string, unknown>, signal?: 
     throw new Error(payload?.detail || `请求失败：${response.status}`)
   }
 
-  return response.json() as Promise<T>
+    invalidateGetCache()
+    return response.json() as Promise<T>
 }
 
 export async function analyzeWithAI(request: {
@@ -403,8 +428,8 @@ export async function analyzeWithAI(request: {
   page_key?: string | null
   page_context?: Record<string, unknown>
   use_model?: boolean
-}): Promise<AIAnalysisResponse> {
-  return apiPost<AIAnalysisResponse>("/api/v1/ai/analyze", request)
+}, signal?: AbortSignal): Promise<AIAnalysisResponse> {
+  return apiPost<AIAnalysisResponse>("/api/v1/ai/analyze", request, signal)
 }
 
 export async function fetchAIPageProfiles(signal?: AbortSignal): Promise<AIPageProfile[]> {
@@ -412,8 +437,15 @@ export async function fetchAIPageProfiles(signal?: AbortSignal): Promise<AIPageP
 }
 
 export type AIStreamEvent = {
-  event: "planner" | "skill" | "mcp" | "model" | "token" | "final" | "error" | string
+  event: "run" | "planner" | "skill" | "mcp" | "model" | "token" | "final" | "error" | "cancelled" | string
   status?: string
+  phase?: "preparing" | "streaming" | "stopping" | "complete" | "error" | "cancelled" | string
+  run_id?: string
+  revision?: number
+  started_at?: string
+  last_event_at?: string
+  event_count?: number
+  cancel_requested?: boolean
   name?: string
   detail?: string
   text?: string
@@ -439,12 +471,13 @@ function errorDetailText(value: unknown, fallback: string): string {
   return fallback
 }
 
-async function streamAIResponse<T>(path: string, request: Record<string, unknown>, onEvent: (event: AIStreamEvent) => void): Promise<T> {
+async function streamAIResponse<T>(path: string, request: Record<string, unknown>, onEvent: (event: AIStreamEvent) => void, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: "POST",
     headers: { Accept: "text/event-stream", "Content-Type": "application/json" },
     body: JSON.stringify(request),
     credentials: "include",
+    signal,
   })
   if (!response.ok) {
     const payload = await response.json().catch(() => null)
@@ -499,8 +532,9 @@ async function streamAIResponse<T>(path: string, request: Record<string, unknown
 export async function streamAnalyzeWithAI(
   request: Parameters<typeof analyzeWithAI>[0],
   onEvent: (event: AIStreamEvent) => void,
+  signal?: AbortSignal,
 ): Promise<AIAnalysisResponse> {
-  return streamAIResponse<AIAnalysisResponse>("/api/v1/ai/analyze/stream", request as Record<string, unknown>, onEvent)
+  return streamAIResponse<AIAnalysisResponse>("/api/v1/ai/analyze/stream", request as Record<string, unknown>, onEvent, signal)
 }
 
 export async function buildPeriodReport(request: {
@@ -517,8 +551,14 @@ export async function buildPeriodReport(request: {
 export async function streamPeriodReport(
   request: Parameters<typeof buildPeriodReport>[0],
   onEvent: (event: AIStreamEvent) => void,
+  signal?: AbortSignal,
 ): Promise<PeriodReportResponse> {
-  return streamAIResponse<PeriodReportResponse>("/api/v1/ai/reports/period/stream", request as Record<string, unknown>, onEvent)
+  return streamAIResponse<PeriodReportResponse>("/api/v1/ai/reports/period/stream", request as Record<string, unknown>, onEvent, signal)
+}
+
+export async function cancelAIStream(runId: string, storeId?: number | null): Promise<Record<string, unknown>> {
+  const query = storeId ? `?store_id=${encodeURIComponent(String(storeId))}` : ""
+  return apiPost<Record<string, unknown>>(`/api/v1/ai/runs/${encodeURIComponent(runId)}/cancel${query}`, {})
 }
 
 export async function fetchAIConversations(storeId?: number | null): Promise<AIConversationListItem[]> {
@@ -646,6 +686,7 @@ async function apiRequest<T>(path: string, options: { method: "PUT" | "PATCH"; b
     throw new Error(payload?.detail || `请求失败：${response.status}`)
   }
 
+  invalidateGetCache()
   return response.json() as Promise<T>
 }
 

@@ -43,6 +43,8 @@ def main() -> int:
     parser.add_argument("--page-sleep", type=float, default=0.35)
     parser.add_argument("--day-sleep-min", type=float, default=1.2)
     parser.add_argument("--day-sleep-max", type=float, default=2.8)
+    parser.add_argument("--qps-retries", type=int, default=3)
+    parser.add_argument("--qps-backoff-seconds", type=float, default=3.0)
     parser.add_argument("--refresh-existing", action="store_true")
     parser.add_argument("--max-consecutive-failures", type=int, default=3)
     parser.add_argument("--database-path", type=Path, default=Path(settings.local_database_path))
@@ -55,7 +57,13 @@ def main() -> int:
         raise ValueError("--end must be greater than or equal to --start.")
     if not 1 <= args.page_size <= 100 or args.max_pages < 1:
         raise ValueError("page-size must be 1..100 and max-pages must be positive.")
-    if args.page_sleep < 0 or args.day_sleep_min < 0 or args.day_sleep_max < args.day_sleep_min:
+    if (
+        args.page_sleep < 0
+        or args.day_sleep_min < 0
+        or args.day_sleep_max < args.day_sleep_min
+        or args.qps_retries < 0
+        or args.qps_backoff_seconds < 0
+    ):
         raise ValueError("sleep values must be valid.")
 
     days = _days(args.start, args.end)
@@ -122,7 +130,13 @@ def _fetch_day(day: date, args: argparse.Namespace, cookie: str) -> tuple[Path, 
     stop_reason = "max_pages"
     for page in range(1, args.max_pages + 1):
         output = day_dir / f"page_{page:04d}.json"
-        status, code, message, _ = fetch_item_ranking(day=day, output=output, cookie=cookie, token=args.token, page=page, page_size=args.page_size, timeout=args.timeout)
+        status, code, message, _ = _fetch_page_with_qps_retry(
+            day=day,
+            args=args,
+            cookie=cookie,
+            page=page,
+            output=output,
+        )
         if not 200 <= status < 300 or code != 0:
             raise RuntimeError(f"page {page} fetch failed: HTTP {status}, code {code}, message {message}")
         payload = json.loads(output.read_text(encoding="utf-8"))
@@ -147,6 +161,38 @@ def _fetch_day(day: date, args: argparse.Namespace, cookie: str) -> tuple[Path, 
     combined = args.output_dir / f"item_ranking_{day.isoformat()}.json"
     combined.write_text(json.dumps({"pages": payloads}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     return combined, rows, len(payloads), stop_reason
+
+
+def _fetch_page_with_qps_retry(
+    *,
+    day: date,
+    args: argparse.Namespace,
+    cookie: str,
+    page: int,
+    output: Path,
+) -> tuple[int, int | None, str | None, int]:
+    """Retry only the platform's explicit QPS response with bounded backoff."""
+
+    for attempt in range(args.qps_retries + 1):
+        result = fetch_item_ranking(
+            day=day,
+            output=output,
+            cookie=cookie,
+            token=args.token,
+            page=page,
+            page_size=args.page_size,
+            timeout=args.timeout,
+        )
+        _status, code, _message, _size = result
+        if code != 1800 or attempt == args.qps_retries:
+            return result
+        delay = args.qps_backoff_seconds * (2 ** attempt) + random.uniform(0, 0.75)
+        print(
+            f"{day.isoformat()} page {page} QPS limited; retrying in {delay:.1f}s "
+            f"({attempt + 1}/{args.qps_retries})"
+        )
+        time.sleep(delay)
+    raise AssertionError("unreachable")
 
 
 def _source_page_metadata(payload: object) -> tuple[list[object], int | None]:

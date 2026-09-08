@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue"
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import {
   Archive,
   BarChart3,
@@ -19,17 +19,19 @@ import {
   Plus,
   Send,
   Sparkles,
+  Square,
   Target,
   Trash2,
   TriangleAlert,
   X,
 } from "lucide-vue-next"
-import { analyzeWithAI, deleteAIConversation, fetchAIConversation, fetchAIConversations, streamAnalyzeWithAI, streamPeriodReport } from "@/api"
+import { analyzeWithAI, cancelAIStream, deleteAIConversation, fetchAIConversation, fetchAIConversations, streamAnalyzeWithAI, streamPeriodReport } from "@/api"
 import type { AIStreamEvent } from "@/api"
 import type { AIAnalysisResponse, PeriodReportResponse } from "@/types"
 import { useDashboard } from "@/composables/useDashboard"
 import BusinessChart from "@/components/BusinessChart.vue"
 import { renderMarkdown } from "@/utils/markdown"
+import { useAIStreamStatus } from "@/composables/useAIStreamStatus"
 
 type ReportType = "daily" | "weekly" | "monthly" | "mtd" | "daily_series"
 type ReportIntent = { report_type: ReportType; anchor_date?: string }
@@ -68,6 +70,11 @@ const showHistory = ref(false)
 const showInspector = ref(false)
 const thinkingClock = ref(0)
 let thinkingTimer: ReturnType<typeof setInterval> | undefined
+const abortController = ref<AbortController | null>(null)
+const streamStatus = useAIStreamStatus()
+const streamStatusTitle = streamStatus.title
+const streamStatusDetail = streamStatus.detail
+const streamElapsedMs = streamStatus.elapsedMs
 
 const quickActions = [
   { label: "查库存", prompt: "查一下大鱼 M 码库存", icon: PackageSearch, tone: "green" },
@@ -161,6 +168,7 @@ async function syncServerSessions() {
 }
 
 function createSession(focus = true) {
+  stopCurrentRun()
   const session: ChatSession = { id: uid("session"), title: "新对话", updatedAt: Date.now(), messages: [] }
   sessions.value = [session, ...sessions.value]
   activeSessionId.value = session.id
@@ -169,6 +177,7 @@ function createSession(focus = true) {
 }
 
 async function removeSession(id: string) {
+  if (activeSessionId.value === id) stopCurrentRun()
   sessions.value = sessions.value.filter((item) => item.id !== id)
   if (!sessions.value.length) createSession(false)
   else if (activeSessionId.value === id) activeSessionId.value = sessions.value[0].id
@@ -177,6 +186,7 @@ async function removeSession(id: string) {
 }
 
 async function selectSession(id: string) {
+  if (activeSessionId.value && activeSessionId.value !== id) stopCurrentRun()
   activeSessionId.value = id
   showHistory.value = false
   const session = activeSession.value
@@ -200,9 +210,7 @@ async function selectSession(id: string) {
   nextTick(scrollConversation)
 }
 
-function updateActiveMessages(nextMessages: ChatMessage[]) {
-  const session = activeSession.value
-  if (!session) return
+function updateSessionMessages(session: ChatSession, nextMessages: ChatMessage[]) {
   session.messages = nextMessages
   session.updatedAt = Date.now()
   if (session.title === "新对话") {
@@ -210,6 +218,11 @@ function updateActiveMessages(nextMessages: ChatMessage[]) {
     if (firstUser?.text) session.title = firstUser.text.slice(0, 24)
   }
   persistSessions()
+}
+
+function updateActiveMessages(nextMessages: ChatMessage[]) {
+  const session = activeSession.value
+  if (session) updateSessionMessages(session, nextMessages)
 }
 
 function scrollConversation() {
@@ -263,6 +276,15 @@ function streamStepLabel(step: { kind: string; name: string }) {
   if (step.kind === "mcp") return `数据工具 · ${step.name}`
   if (step.kind === "model") return `分析模型 · ${step.name}`
   return step.name
+}
+
+function stopCurrentRun() {
+  const controller = abortController.value
+  if (!controller) return
+  streamStatus.cancel()
+  const runId = streamStatus.runId.value
+  if (runId) void cancelAIStream(runId, currentStoreId.value).catch(() => undefined)
+  controller.abort()
 }
 
 function artifactsFor(message: ChatMessage): AIArtifact[] { return (message.analysis?.diagnosis.artifacts || []) as AIArtifact[] }
@@ -595,16 +617,21 @@ async function runReport(type: ReportType) {
 async function send(value = question.value, reportType?: ReportType) {
   const text = value.trim()
   if (!text || loading.value || !activeSession.value) return
+  const targetSession = activeSession.value
   question.value = ""
   error.value = ""
   loading.value = true
   const userMessage: ChatMessage = { id: uid(), role: "user", text, createdAt: Date.now() }
   const pending: ChatMessage = { id: uid(), role: "assistant", loading: true, createdAt: Date.now() }
   startThinkingClock(pending)
-  updateActiveMessages([...messages.value, userMessage, pending])
+  const controller = new AbortController()
+  abortController.value = controller
+  streamStatus.start()
+  updateSessionMessages(targetSession, [...targetSession.messages, userMessage, pending])
   scrollConversation()
   const onStreamEvent = (event: AIStreamEvent) => {
-    const current = activeSession.value?.messages.find((item) => item.id === pending.id)
+    streamStatus.accept(event)
+    const current = targetSession.messages.find((item) => item.id === pending.id)
     if (!current) return
     if (event.event === "token" && event.text) current.streamText = `${current.streamText || ""}${event.text}`
     if (event.event === "skill") {
@@ -628,30 +655,36 @@ async function send(value = question.value, reportType?: ReportType) {
   }
   try {
     if (reportType) {
-        const report = await streamPeriodReport({ report_type: reportType, conversation_id: activeSession.value.id, anchor_date: currentRange.value, store_id: currentStoreId.value, use_model: true }, onStreamEvent)
+        const report = await streamPeriodReport({ report_type: reportType, conversation_id: targetSession.id, anchor_date: currentRange.value, store_id: currentStoreId.value, use_model: true }, onStreamEvent, controller.signal)
       stopThinkingClock(pending)
-      updateActiveMessages([...messages.value.filter((item) => item.id !== pending.id), { ...pending, loading: false, report }])
+      updateSessionMessages(targetSession, [...targetSession.messages.filter((item) => item.id !== pending.id), { ...pending, loading: false, report }])
     } else {
       const inferredReportIntent = inferReportIntent(text)
       if (inferredReportIntent) {
-        const report = await streamPeriodReport({ report_type: inferredReportIntent.report_type, conversation_id: activeSession.value.id, anchor_date: inferredReportIntent.anchor_date || currentRange.value, store_id: currentStoreId.value, target_gmv: extractTargetGmv(text), use_model: true }, onStreamEvent)
+        const report = await streamPeriodReport({ report_type: inferredReportIntent.report_type, conversation_id: targetSession.id, anchor_date: inferredReportIntent.anchor_date || currentRange.value, store_id: currentStoreId.value, target_gmv: extractTargetGmv(text), use_model: true }, onStreamEvent, controller.signal)
         stopThinkingClock(pending)
-        updateActiveMessages([...messages.value.filter((item) => item.id !== pending.id), { ...pending, loading: false, report }])
+        updateSessionMessages(targetSession, [...targetSession.messages.filter((item) => item.id !== pending.id), { ...pending, loading: false, report }])
       } else {
-        const request = { question: text, conversation_id: activeSession.value.id, store_id: currentStoreId.value, start_date: analysisStartDate.value, end_date: analysisEndDate.value, page_context: workbenchPageContext.value, use_model: true }
+        const request = { question: text, conversation_id: targetSession.id, store_id: currentStoreId.value, start_date: analysisStartDate.value, end_date: analysisEndDate.value, page_context: workbenchPageContext.value, use_model: true }
         const analysis = isLightChatQuestion(text)
-          ? await analyzeWithAI(request)
-          : await streamAnalyzeWithAI(request, onStreamEvent)
+          ? await analyzeWithAI(request, controller.signal)
+          : await streamAnalyzeWithAI(request, onStreamEvent, controller.signal)
         stopThinkingClock(pending)
-        updateActiveMessages([...messages.value.filter((item) => item.id !== pending.id), { ...pending, loading: false, analysis }])
+        updateSessionMessages(targetSession, [...targetSession.messages.filter((item) => item.id !== pending.id), { ...pending, loading: false, analysis }])
       }
     }
   } catch (err) {
     stopThinkingClock(pending)
+    if (controller.signal.aborted) {
+      updateSessionMessages(targetSession, [...targetSession.messages.filter((item) => item.id !== pending.id), { ...pending, loading: false, text: "已停止生成" }])
+      return
+    }
     console.error("AI request failed", err)
     error.value = errorText(err)
-    updateActiveMessages([...messages.value.filter((item) => item.id !== pending.id), { ...pending, loading: false, text: error.value, error: true }])
+    updateSessionMessages(targetSession, [...targetSession.messages.filter((item) => item.id !== pending.id), { ...pending, loading: false, text: error.value, error: true }])
   } finally {
+    if (abortController.value === controller) abortController.value = null
+    streamStatus.finish(controller.signal.aborted ? "cancelled" : "complete")
     loading.value = false
     scrollConversation()
   }
@@ -670,6 +703,10 @@ onMounted(async () => {
   if (activeSessionId.value) await selectSession(activeSessionId.value)
 })
 watch(activeSessionId, scrollConversation)
+onBeforeUnmount(() => {
+  stopCurrentRun()
+  if (thinkingTimer) clearInterval(thinkingTimer)
+})
 </script>
 
 <template>
@@ -691,7 +728,7 @@ watch(activeSessionId, scrollConversation)
           <div v-if="message.role === 'user'" class="ai-message ai-message-user"><div class="ai-message-body"><p>{{ message.text }}</p><time>{{ messageTime(message.createdAt) }}</time></div><div class="ai-user-avatar">A</div></div>
           <div v-else class="ai-message ai-message-assistant"><div class="ai-assistant-avatar"><Bot :size="17" /></div><div class="ai-message-body ai-result-body">
             <div v-if="message.loading" class="ai-thinking ai-agent-thinking">
-              <div class="ai-thinking-head"><span class="ai-thinking-dots"><i></i><i></i><i></i></span><div><strong>{{ message.streamText ? '正在生成回答' : '正在读取数据并形成判断' }}</strong><small>可审计分析过程 · 已用 {{ elapsedText(thinkingClock) }}</small></div></div>
+              <div class="ai-thinking-head"><span class="ai-thinking-dots"><i></i><i></i><i></i></span><div><strong>{{ streamStatusTitle }}</strong><small>{{ streamStatusDetail }} · 已用 {{ elapsedText(streamElapsedMs) }}</small></div><button type="button" class="ai-stream-stop" title="停止生成" @click="stopCurrentRun"><Square :size="14" />停止</button></div>
               <div v-if="message.activeSkill" class="ai-agent-capabilities"><span>主 Agent</span><b>{{ message.activeSkill.display_name }}</b><em v-for="skill in message.supportingSkills || []" :key="skill.name">{{ skill.display_name }}</em></div>
               <div v-if="message.streamSteps?.length" class="ai-live-step-list"><div v-for="(step, index) in message.streamSteps" :key="`${step.kind}-${step.name}-${index}`" :class="`is-${step.status}`"><LoaderCircle v-if="step.status === 'running'" :size="13" class="spinning" /><CheckCircle2 v-else-if="step.status === 'completed'" :size="13" /><TriangleAlert v-else-if="step.status === 'failed'" :size="13" /><Clock3 v-else :size="13" /><span><b>{{ streamStepLabel(step) }}</b><small>{{ step.detail }}</small></span></div></div>
                <div v-if="message.streamText" class="ai-stream-answer ai-markdown-content" v-html="renderReportNarrative(message.streamText)"></div>

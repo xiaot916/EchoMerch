@@ -7,6 +7,7 @@ import sys
 import time
 from datetime import date
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -104,14 +105,62 @@ def fetch_databank_daily(*, business_day: date, output: Path, cookie: str, csrf_
                 "x-requested-with": "XMLHttpRequest",
             },
         )
-        with urlopen(request, timeout=timeout) as response:
-            status = response.status
-            payload[key] = json.loads(response.read().decode("utf-8"))
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                status = response.status
+                response_body = response.read()
+        except HTTPError as exc:
+            payload[key] = {
+                "_echoMerchHttpStatus": exc.code,
+                "_echoMerchRawBody": exc.read().decode("utf-8", errors="replace"),
+            }
+            _write_payload(output, payload)
+            raise RuntimeError(f"品牌数据银行 {key} 请求失败: HTTP {exc.code}") from exc
+        try:
+            payload[key] = json.loads(response_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            payload[key] = {
+                "_echoMerchHttpStatus": status,
+                "_echoMerchRawBody": response_body.decode("utf-8", errors="replace"),
+                "_echoMerchDecodeError": str(exc),
+            }
+            _write_payload(output, payload)
+            raise RuntimeError(f"品牌数据银行 {key} 返回了非 JSON 响应") from exc
+        # Persist after each endpoint. A later endpoint may time out, but the
+        # earlier platform envelopes still explain whether the day was valid.
+        _write_payload(output, payload)
         # Always fetch the complete contract.  The newer homepage endpoints
         # can contain useful data even when the legacy core endpoint is empty.
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    endpoint_errors = [
+        f"{key}: {error}"
+        for key, response in payload.items()
+        if (error := _endpoint_error(response)) is not None
+    ]
+    if endpoint_errors:
+        raise RuntimeError("品牌数据银行接口返回异常: " + "; ".join(endpoint_errors))
     return status, len(payload)
+
+
+def _write_payload(output: Path, payload: dict[str, object]) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+
+def _endpoint_error(response: object) -> str | None:
+    if not isinstance(response, dict):
+        return "响应格式无效"
+    error_code = response.get("errCode")
+    if error_code not in (None, 0, "0"):
+        return f"errCode={error_code}, errMsg={response.get('errMsg') or 'unknown'}"
+    code_class = str(response.get("codeClass") or "").upper()
+    if code_class and code_class not in {"SUCCESS", "OK"}:
+        return f"codeClass={code_class}, errMsg={response.get('errMsg') or 'unknown'}"
+    if response.get("success") is False:
+        return str(response.get("message") or response.get("msg") or "success=false")
+    return None
 
 
 def main() -> int:

@@ -582,6 +582,8 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid 
 .ai-thinking small { color: #8c9c94; font-size: 10px; }
 .ai-thinking-head { display: flex; align-items: flex-start; gap: 9px; }
 .ai-thinking-head > div { display: grid; gap: 4px; }
+.ai-stream-stop { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; border: 1px solid #d8e5dc; border-radius: 7px; background: #fff; color: #60756a; padding: 5px 8px; font-size: 10px; cursor: pointer; }
+.ai-stream-stop:hover { border-color: #b8cfbf; color: #2e7855; background: #f5faf6; }
 .ai-agent-capabilities { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 2px; }
 .ai-agent-capabilities span { color: #8a9a91; font-size: 9px; }
 .ai-agent-capabilities b, .ai-agent-capabilities em { border: 1px solid #d7e9dc; border-radius: 4px; padding: 3px 6px; color: #267651; background: #f3fbf5; font-size: 9px; font-style: normal; font-weight: 700; }

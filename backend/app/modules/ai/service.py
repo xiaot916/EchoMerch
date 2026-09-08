@@ -12,8 +12,10 @@ from collections.abc import Callable
 from app.core.config import settings
 from app.core.local_database import LocalDatabase
 from app.modules.ai.mcp import CommerceMCPService
+from app.modules.ai.agent_planner import AgentPlan, build_agent_plan, diagnose_agent_plan
 from app.modules.ai.page_profiles import enrich_page_context
 from app.modules.ai.provider import AIProviderError, AgnesProvider
+from app.modules.ai.run_registry import AIRunCancelled
 from app.modules.ai.schemas import (
     AIConversationState,
     AIConversationMessage,
@@ -340,19 +342,45 @@ class AIAnalysisService:
         if not follow_up:
             return request
         memory = state.memory
-        context_text = json.dumps(
-            {
-                "上一轮问题": memory.get("last_question"),
-                "上一轮结论": memory.get("headline"),
-                "重点对象": memory.get("focus") or memory.get("findings"),
-                "上一轮分析能力": memory.get("skill"),
-                "上一轮范围": [memory.get("range_start"), memory.get("range_end")],
-                "已确认规划输入": memory.get("planning_inputs"),
-                "近期结论": memory.get("timeline"),
-            },
-            ensure_ascii=False,
+        # Routing must use the user's current wording.  Concatenating a large
+        # historical JSON block into ``question`` made follow-ups match stale
+        # keywords and sent a channel-comparison question to generic data
+        # exploration.  Keep history structured for planners/model context.
+        page_context = dict(request.page_context)
+        page_context["conversation_context"] = {
+            "last_question": memory.get("last_question"),
+            "headline": memory.get("headline"),
+            "focus": memory.get("focus") or memory.get("findings"),
+            "skill": memory.get("skill"),
+            "range_start": memory.get("range_start"),
+            "range_end": memory.get("range_end"),
+            "planning_inputs": memory.get("planning_inputs"),
+            "timeline": memory.get("timeline"),
+        }
+        return request.model_copy(update={"page_context": page_context})
+
+    def _agent_plan(self, request: AnalysisRequest, conversation: AIConversationState, store_id: int | None) -> AgentPlan | None:
+        inherited_end = None
+        try:
+            raw_end = conversation.memory.get("range_end")
+            inherited_end = date.fromisoformat(str(raw_end)) if raw_end else None
+        except (TypeError, ValueError):
+            inherited_end = None
+        available_end = None
+        if request.end_date is None and inherited_end is None:
+            try:
+                _minimum, available_end = self.mcp.analytics._source_for_store(store_id).get_date_bounds()
+            except Exception:
+                # Planner matching is optional.  Existing Skills remain the
+                # fallback when a store has no readable business-date bound.
+                available_end = None
+        return build_agent_plan(
+            question=request.question,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            inherited_end_date=inherited_end,
+            available_end_date=available_end,
         )
-        return request.model_copy(update={"question": f"基于以下上一轮上下文回答追问。{context_text}\n当前追问：{question}"})
 
     def list_skills(self):
         return [skill.descriptor for skill in SKILLS]
@@ -420,6 +448,11 @@ class AIAnalysisService:
             callback({"event": event, **payload})
 
     @staticmethod
+    def _check_cancelled(should_stop: Callable[[], bool] | None) -> None:
+        if should_stop is not None and should_stop():
+            raise AIRunCancelled("AI 流式任务已取消")
+
+    @staticmethod
     def _tool_call_key(tool: str, arguments: dict[str, object]) -> str:
         """Stable signature for reusing an identical read-only MCP call."""
         ignored = {"request_id"}
@@ -439,6 +472,7 @@ class AIAnalysisService:
         user_id: int | None = None,
         on_event: Callable[[dict], None] | None = None,
         stream_model: bool = False,
+        should_stop: Callable[[], bool] | None = None,
     ) -> AnalysisResponse:
         started = time.perf_counter()
         request_id = str(uuid4())
@@ -450,12 +484,32 @@ class AIAnalysisService:
         })
         conversation = self._conversation_state(request.conversation_id, user_id=user_id, store_id=store_id)
         contextual_request = self._contextual_request(request, conversation)
+        agent_plan = self._agent_plan(request, conversation, store_id)
         skill, supporting_skills = select_skills(contextual_request.question, request.domain, request.page_context)
+        if agent_plan is not None:
+            by_name = {item.descriptor.name: item for item in SKILLS}
+            skill = by_name.get(agent_plan.primary_skill, skill)
+            supporting_skills = [
+                candidate for name in agent_plan.supporting_skills
+                if (candidate := by_name.get(name)) is not None and candidate.descriptor.name != skill.descriptor.name
+            ]
         skill_inputs = self._planning_inputs(contextual_request)
-        self._emit(on_event, "planner", status="completed", name="ecommerce-analysis-router", detail=f"已选择主能力：{skill.descriptor.display_name}")
+        if agent_plan is not None:
+            skill_inputs["analysis_plan"] = agent_plan.as_dict()
+        planner_detail = (
+            f"已生成证据计划：{agent_plan.intent.goal}"
+            if agent_plan is not None else f"已选择主能力：{skill.descriptor.display_name}"
+        )
+        self._emit(on_event, "planner", status="completed", name="evidence-driven-agent-planner" if agent_plan else "ecommerce-analysis-router", detail=planner_detail)
         self._emit(on_event, "skill", status="completed", name=skill.descriptor.name, detail=f"主能力 {skill.descriptor.display_name} · 辅助能力 {len(supporting_skills)} 个", skill=skill.descriptor.model_dump(mode="json"), supporting_skills=[item.descriptor.model_dump(mode="json") for item in supporting_skills])
         steps = [
-            ExecutionStep(kind="planner", name="ecommerce-analysis-router", status="completed", detail=f"主 Skill：{skill.descriptor.display_name}；候选辅助 Skill：{len(supporting_skills)} 个", elapsed_ms=0),
+            ExecutionStep(
+                kind="planner",
+                name="evidence-driven-agent-planner" if agent_plan else "ecommerce-analysis-router",
+                status="completed",
+                detail=planner_detail if agent_plan else f"主 Skill：{skill.descriptor.display_name}；候选辅助 Skill：{len(supporting_skills)} 个",
+                elapsed_ms=0,
+            ),
             ExecutionStep(kind="skill", name=skill.descriptor.name, status="completed", detail=f"版本 {skill.descriptor.version}", elapsed_ms=0),
         ]
         results: list[MCPEnvelope] = []
@@ -465,10 +519,12 @@ class AIAnalysisService:
         error_message: str | None = None
 
         try:
+            self._check_cancelled(should_stop)
             # Inventory is a dedicated point-in-time workflow. Do not let a
             # single word such as “库存” hijack a store-wide diagnosis that
             # intentionally includes product, channel and service evidence.
             if skill.descriptor.name == "inventory-query":
+                self._check_cancelled(should_stop)
                 self._emit(on_event, "mcp", status="running", name="inventory.query", detail="查询最新库存快照")
                 tool_started = time.perf_counter()
                 inventory_result = self.mcp.execute("inventory.query", {
@@ -587,8 +643,9 @@ class AIAnalysisService:
                         self._emit(on_event, "mcp", status="completed", name="products.get_series_profile", detail="系列画像已返回", result_status=profile_result.status, elapsed_ms=tool_elapsed)
                 custom_diagnosis = self._product_profile_diagnosis(results)
             else:
-                workflow = skill.descriptor.workflow or []
+                workflow = list(agent_plan.calls) if agent_plan is not None else skill.descriptor.workflow or []
                 for step in workflow:
+                    self._check_cancelled(should_stop)
                     step_arguments = {**arguments, **step.arguments}
                     if skill.descriptor.name == "mini-product-diagnosis" and step.tool == "mini.get_diagnosis":
                         # The MINI tool owns catalog identity. Pass through an
@@ -643,11 +700,13 @@ class AIAnalysisService:
                 # plan loads the neighbouring store facts that let Agnes rank
                 # competing explanations.  All calls are read-only and are
                 # deduplicated against the primary workflow.
-                for tool, extra_arguments in self._compound_evidence_plan(
+                evidence_plan = [] if agent_plan is not None else self._compound_evidence_plan(
                     skill.descriptor.name,
                     contextual_request.question,
                     request.page_context,
-                ):
+                )
+                for tool, extra_arguments in evidence_plan:
+                    self._check_cancelled(should_stop)
                     evidence_arguments = {**arguments, **extra_arguments}
                     call_key = self._tool_call_key(tool, evidence_arguments)
                     if call_key in executed_calls:
@@ -671,6 +730,31 @@ class AIAnalysisService:
                     warnings.extend(evidence_result.warnings)
                     steps.append(ExecutionStep(kind="mcp", name=tool, status="completed", detail=f"跨域证据已返回；{evidence_result.status}", elapsed_ms=evidence_elapsed))
                     self._emit(on_event, "mcp", status="completed", name=tool, detail="跨域证据已返回", result_status=evidence_result.status, elapsed_ms=evidence_elapsed)
+
+                if agent_plan is not None:
+                    repair_calls = agent_plan.repair_calls(results)
+                    if repair_calls:
+                        self._emit(on_event, "planner", status="completed", name="evidence-quality-gate", detail="一级来源比较未返回分组行，追加逐日原始证据验证")
+                        steps.append(ExecutionStep(kind="planner", name="evidence-quality-gate", status="completed", detail="一级来源比较未返回分组行，追加逐日原始证据验证", elapsed_ms=0))
+                    else:
+                        self._emit(on_event, "planner", status="completed", name="evidence-quality-gate", detail="比较窗口与一级来源证据满足结论条件")
+                        steps.append(ExecutionStep(kind="planner", name="evidence-quality-gate", status="completed", detail="比较窗口与一级来源证据满足结论条件", elapsed_ms=0))
+                    for repair in repair_calls:
+                        self._check_cancelled(should_stop)
+                        repair_arguments = {**arguments, **repair.arguments}
+                        call_key = self._tool_call_key(repair.tool, repair_arguments)
+                        if call_key in executed_calls:
+                            continue
+                        executed_calls.add(call_key)
+                        self._emit(on_event, "mcp", status="running", name=repair.tool, detail=repair.description)
+                        repair_started = time.perf_counter()
+                        repair_result = self.mcp.execute(repair.tool, repair_arguments)
+                        repair_elapsed = round((time.perf_counter() - repair_started) * 1000, 1)
+                        results.append(repair_result)
+                        warnings.extend(repair_result.warnings)
+                        steps.append(ExecutionStep(kind="mcp", name=repair.tool, status="completed", detail=f"{repair.description}；返回 {repair_result.status}", elapsed_ms=repair_elapsed))
+                        self._emit(on_event, "mcp", status="completed", name=repair.tool, detail=repair.description, result_status=repair_result.status, elapsed_ms=repair_elapsed)
+                    custom_diagnosis = diagnose_agent_plan(agent_plan, results)
 
                 if skill.descriptor.name == "promotion-roi":
                     efficiency = next((item for item in results if item.tool == "promotions.get_efficiency"), None)
@@ -739,6 +823,7 @@ class AIAnalysisService:
                     if stream_model and on_event is not None:
                         answer = ""
                         for chunk in self.provider.stream_answer(**provider_kwargs):
+                            self._check_cancelled(should_stop)
                             answer += chunk
                             self._emit(on_event, "token", text=chunk)
                         if not answer.strip():
@@ -799,6 +884,8 @@ class AIAnalysisService:
             self._log(request_id, request, store_id, response, started, error_message)
             self._emit(on_event, "final", status="completed", response=response.model_dump(mode="json"))
             return response
+        except AIRunCancelled:
+            raise
         except Exception as exc:
             self._emit(on_event, "error", status="failed", detail=str(exc))
             self._log_failure(request_id, request, store_id, skill.descriptor.name, skill.descriptor.version, started, str(exc))
@@ -1500,6 +1587,7 @@ class AIAnalysisService:
         user_id: int | None = None,
         on_event: Callable[[dict], None] | None = None,
         stream_model: bool = False,
+        should_stop: Callable[[], bool] | None = None,
     ) -> PeriodReportResponse:
         started = time.perf_counter()
         conversation = self._conversation_state(request.conversation_id, user_id=user_id, store_id=store_id)
@@ -1529,6 +1617,7 @@ class AIAnalysisService:
         self._emit(on_event, "planner", status="completed", name="period-report-router", detail=f"已选择报告能力：{skill.descriptor.display_name}")
         self._emit(on_event, "skill", status="completed", name=skill.descriptor.name, detail="周期报告 Agent 已就绪", skill=skill.descriptor.model_dump(mode="json"), supporting_skills=[])
         self._emit(on_event, "mcp", status="running", name="reports.build_period_report", detail="汇总周期经营数据")
+        self._check_cancelled(should_stop)
         data_started = time.perf_counter()
         result = self.mcp.execute("reports.build_period_report", {
             "store_id": store_id,
@@ -1601,6 +1690,7 @@ class AIAnalysisService:
                 if stream_model and on_event is not None:
                     text = ""
                     for chunk in self.provider.stream_answer(**provider_kwargs):
+                        self._check_cancelled(should_stop)
                         text += chunk
                         self._emit(on_event, "token", text=chunk)
                     if not text.strip():
@@ -1916,7 +2006,12 @@ class AIAnalysisService:
                 "causal_boundary": "",
                 "next_questions": list(dict.fromkeys(diagnosis.next_questions)),
             })
-        coverage = cls._coverage_summary(results)
+        # A typed Agent plan owns its comparison window.  Its coverage is
+        # intentionally scoped to the current analysis period; a preceding
+        # range may be queried for comparison or auditing and must not turn a
+        # complete "最近两天" result into a misleading 2/4 status card.
+        plan_scope = diagnosis.analysis_plan.get("intent") if diagnosis.analysis_plan else None
+        coverage = diagnosis.coverage if plan_scope else cls._coverage_summary(results)
         report_quality = None
         if skill.descriptor.name == "period-report-generation":
             report_quality = (results[0].data.get("decision_quality") or {}).get("overall") if results else None
@@ -1930,6 +2025,8 @@ class AIAnalysisService:
                 confidence = "high"
             else:
                 confidence = "low"
+        elif plan_scope:
+            confidence = diagnosis.confidence
         elif report_quality and report_quality.get("confidence") in {"high", "medium", "low"}:
             confidence = str(report_quality["confidence"])
         else:
@@ -1952,8 +2049,13 @@ class AIAnalysisService:
 
         contexts = [item.context for item in results if item.context]
         context = contexts[0] if contexts else None
-        scope_start = context.range_start.isoformat() if context else request.start_date.isoformat() if request.start_date else None
-        scope_end = context.range_end.isoformat() if context else request.end_date.isoformat() if request.end_date else None
+        if isinstance(plan_scope, dict):
+            current_range = plan_scope.get("current_range") or []
+            scope_start = str(current_range[0]) if len(current_range) == 2 else None
+            scope_end = str(current_range[1]) if len(current_range) == 2 else None
+        else:
+            scope_start = context.range_start.isoformat() if context else request.start_date.isoformat() if request.start_date else None
+            scope_end = context.range_end.isoformat() if context else request.end_date.isoformat() if request.end_date else None
         metric_definitions: dict[str, str] = {}
         denominator_notes = {"占比、ROI 和排名使用本次查询的全量结果作为分母；展示 Top N 不改变总计。"}
         evidence_refs: list[str] = []

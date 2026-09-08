@@ -80,6 +80,11 @@ class DatasetCoverage(BaseModel):
     last_attempt_at: str | None = None
     last_run_status: str | None = None
     error_message: str | None = None
+    coverage_window_start: str | None = None
+    contiguous_latest_date: str | None = None
+    backfill_start_date: str | None = None
+    gap_count: int = 0
+    missing_dates: list[str] = Field(default_factory=list)
     tables: list[DatasetTableCoverage] = Field(default_factory=list)
 
 

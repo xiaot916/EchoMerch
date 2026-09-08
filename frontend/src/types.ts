@@ -888,6 +888,11 @@ export interface AnalysisDailyMetric {
 }
 
 export interface CustomerAnalysis {
+  expected_days: number
+  covered_days: number
+  first_covered_date: string | null
+  latest_covered_date: string | null
+  missing_dates: string[]
   shop_customers: number | null
   shop_customers_stat_date: string | null
   new_customers: number
@@ -1528,6 +1533,11 @@ export interface DatasetCoverage {
   last_attempt_at: string | null
   last_run_status: string | null
   error_message: string | null
+  coverage_window_start: string | null
+  contiguous_latest_date: string | null
+  backfill_start_date: string | null
+  gap_count: number
+  missing_dates: string[]
   tables: DatasetTableCoverage[]
 }
 

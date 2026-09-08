@@ -167,3 +167,25 @@ def test_utry_rejects_a_page_when_server_ignores_requested_offset(
             output=tmp_path / "ignored-offset.json",
             cookie="t=runtime-session",
         )
+
+
+def test_utry_persists_a_success_response_that_lacks_pagination_metadata(
+    monkeypatch, tmp_path: Path
+) -> None:
+    payload = {"code": 0, "data": {"value": {"values": []}}}
+    monkeypatch.setattr(
+        fetch_utry_report,
+        "urlopen",
+        lambda request, timeout: _Response(payload),
+    )
+    output = tmp_path / "missing-page.json"
+
+    with pytest.raises(RuntimeError, match="missing data.value.page"):
+        fetch_utry_report.fetch_utry_report(
+            template=_template(),
+            business_day=date(2026, 9, 6),
+            output=output,
+            cookie="t=runtime-session",
+        )
+
+    assert json.loads(output.read_text(encoding="utf-8")) == payload

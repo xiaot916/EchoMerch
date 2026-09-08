@@ -54,16 +54,18 @@ def fetch_utry_report(
         cookie=cookie,
         timeout=timeout,
     )
+    # Persist the first completed HTTP response before interpreting its shape.
+    # A 200 response can still be a platform-side error envelope with no
+    # pagination block, and keeping it makes a later retry diagnosable.
+    output.write_bytes(response_body)
     code, message = _response_status(response_body)
     if not 200 <= status < 300 or code != 0:
-        output.write_bytes(response_body)
         row_count, row_limit, _ = _response_page(response_body)
         return status, code, message, len(response_body), row_count, row_limit
 
     payload = _decode_payload(response_body)
     row_count, row_limit, row_offset = _payload_page(payload)
     if row_count <= row_limit:
-        output.write_bytes(response_body)
         return status, code, message, len(response_body), row_count, row_limit
     if row_limit <= 0:
         raise RuntimeError(

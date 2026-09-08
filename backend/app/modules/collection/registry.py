@@ -12,6 +12,10 @@ class CollectionDataset:
     task_types: tuple[str, ...]
     description: str
     allow_no_data: bool = False
+    # Some report components are validly empty after a successful read. The
+    # table remains part of the dataset contract, but an empty result is not a
+    # collection gap when every component worker completed.
+    empty_report_tables: tuple[str, ...] = ()
     scope: str = "store"
     collection_mode: str = "daily_fact"
 
@@ -154,7 +158,8 @@ COLLECTION_DATASETS: tuple[CollectionDataset, ...] = (
         "alimama_adgroup_bidwords", "推广单元与关键词", "推广", (
             "store_daily_promotion_adgroups", "store_daily_promotion_bidwords",
         ), ("alimama_adgroups", "alimama_bidwords"),
-        "推广单元和关键词明细必须同时到达。",
+        "推广单元和关键词明细必须同时到达；关键词成功返回空列表时单独标记为无数据。",
+        empty_report_tables=("store_daily_promotion_bidwords",),
     ),
 )
 

@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -35,6 +36,11 @@ from app.core.local_database import (  # noqa: E402
     LocalDatabase,
     q,
 )
+from app.modules.collection.coverage import (  # noqa: E402
+    DEFAULT_COVERAGE_WINDOW_DAYS,
+    DatasetGapAudit,
+    audit_dataset_coverage,
+)
 from app.modules.collection.registry import COLLECTION_DATASET_BY_KEY  # noqa: E402
 from app.modules.imports.crawl_run_store import CrawlRunStore  # noqa: E402
 
@@ -45,37 +51,40 @@ class DatasetSpec:
     script: str
     description: str
     supports_database: bool = True
+    # Browser page/resource group. Jobs in one group must not navigate the
+    # same SPA concurrently; None means the dataset is isolated by name.
+    platform_group: str | None = None
 
 
 # Keep this list explicit and ordered.  The order mirrors the warehouse layers
 # and makes console output stable for scheduled runs and troubleshooting.
 DATASETS: tuple[DatasetSpec, ...] = (
-    DatasetSpec("sycm_overviews", "backfill_sycm_overviews.py", "SYCM 店铺总览"),
-    DatasetSpec("sycm_bybt", "backfill_sycm_bybt.py", "SYCM 生意参谋 BYBT"),
-    DatasetSpec("sycm_bybt_items", "backfill_sycm_bybt_items.py", "SYCM 百亿补贴商品明细"),
-    DatasetSpec("sycm_customer_overviews", "backfill_sycm_customer_overviews.py", "SYCM 客户概览"),
-    DatasetSpec("sycm_item_rankings", "backfill_sycm_item_rankings.py", "SYCM 商品排行"),
-    DatasetSpec("sycm_live", "backfill_sycm_live.py", "SYCM 直播"),
-    DatasetSpec("sycm_member_analysis", "backfill_sycm_member_analysis.py", "SYCM 会员分析"),
-    DatasetSpec("sycm_new_customer_discount", "backfill_sycm_new_customer_discount.py", "SYCM 新客优惠"),
-    DatasetSpec("sycm_shopping_gold", "backfill_sycm_shopping_gold.py", "SYCM 淘金币"),
-    DatasetSpec("sycm_traffic_sources", "backfill_sycm_traffic_sources.py", "SYCM 流量来源"),
-    DatasetSpec("sycm_market", "collect_sycm_market.py", "SYCM 市场排行与搜索词", supports_database=False),
-    DatasetSpec("mtop_content_overviews", "backfill_mtop_content_overviews.py", "内容效果总览"),
-    DatasetSpec("mtop_taojinbi", "backfill_mtop_taojinbi.py", "淘金币 MTop"),
-    DatasetSpec("customer_service", "backfill_customer_service.py", "客服总览与账号"),
-    DatasetSpec("cps_overviews", "backfill_cps_overviews.py", "淘宝客 CPS 总览"),
-    DatasetSpec("brandsearch_reports", "backfill_brandsearch_reports.py", "品销宝品牌专区"),
-    DatasetSpec("taobao_flash_sales", "backfill_taobao_flash_sales.py", "淘宝秒杀"),
-    DatasetSpec("taobao_flash_sale_items", "backfill_taobao_flash_sale_items.py", "淘宝秒杀商品明细"),
-    DatasetSpec("taobao_operational_snapshots", "backfill_taobao_operational_snapshots.py", "淘宝红线价、当前价格与活动在线快照"),
-    DatasetSpec("sycm_activity_calendar", "backfill_sycm_activity_calendar.py", "SYCM 活动日历当前快照"),
-    DatasetSpec("utry_overviews", "backfill_utry_overviews.py", "U先派样与复购商品数据"),
-    DatasetSpec("alimama_campaigns", "backfill_alimama_campaigns.py", "阿里妈妈计划"),
-    DatasetSpec("alimama_crowds", "backfill_alimama_crowds.py", "阿里妈妈人群"),
-    DatasetSpec("alimama_promotion_details", "backfill_alimama_promotion_details.py", "阿里妈妈推广明细"),
-    DatasetSpec("alimama_adgroup_bidwords", "backfill_alimama_adgroup_bidwords.py", "阿里妈妈单元/关键词"),
-    DatasetSpec("databank_daily", "backfill_databank_daily.py", "品牌数据银行日报"),
+    DatasetSpec("sycm_overviews", "backfill_sycm_overviews.py", "SYCM 店铺总览", platform_group="sycm"),
+    DatasetSpec("sycm_bybt", "backfill_sycm_bybt.py", "SYCM 生意参谋 BYBT", platform_group="sycm"),
+    DatasetSpec("sycm_bybt_items", "backfill_sycm_bybt_items.py", "SYCM 百亿补贴商品明细", platform_group="sycm"),
+    DatasetSpec("sycm_customer_overviews", "backfill_sycm_customer_overviews.py", "SYCM 客户概览", platform_group="sycm"),
+    DatasetSpec("sycm_item_rankings", "backfill_sycm_item_rankings.py", "SYCM 商品排行", platform_group="sycm"),
+    DatasetSpec("sycm_live", "backfill_sycm_live.py", "SYCM 直播", platform_group="sycm"),
+    DatasetSpec("sycm_member_analysis", "backfill_sycm_member_analysis.py", "SYCM 会员分析", platform_group="sycm"),
+    DatasetSpec("sycm_new_customer_discount", "backfill_sycm_new_customer_discount.py", "SYCM 新客优惠", platform_group="sycm"),
+    DatasetSpec("sycm_shopping_gold", "backfill_sycm_shopping_gold.py", "SYCM 淘金币", platform_group="sycm"),
+    DatasetSpec("sycm_traffic_sources", "backfill_sycm_traffic_sources.py", "SYCM 流量来源", platform_group="sycm"),
+    DatasetSpec("sycm_market", "collect_sycm_market.py", "SYCM 市场排行与搜索词", supports_database=False, platform_group="sycm"),
+    DatasetSpec("mtop_content_overviews", "backfill_mtop_content_overviews.py", "内容效果总览", platform_group="mtop"),
+    DatasetSpec("mtop_taojinbi", "backfill_mtop_taojinbi.py", "淘金币 MTop", platform_group="mtop"),
+    DatasetSpec("customer_service", "backfill_customer_service.py", "客服总览与账号", platform_group="customer_service"),
+    DatasetSpec("cps_overviews", "backfill_cps_overviews.py", "淘宝客 CPS 总览", platform_group="alimama"),
+    DatasetSpec("brandsearch_reports", "backfill_brandsearch_reports.py", "品销宝品牌专区", platform_group="brandsearch"),
+    DatasetSpec("taobao_flash_sales", "backfill_taobao_flash_sales.py", "淘宝秒杀", platform_group="taobao"),
+    DatasetSpec("taobao_flash_sale_items", "backfill_taobao_flash_sale_items.py", "淘宝秒杀商品明细", platform_group="taobao"),
+    DatasetSpec("taobao_operational_snapshots", "backfill_taobao_operational_snapshots.py", "淘宝红线价、当前价格与活动在线快照", platform_group="taobao"),
+    DatasetSpec("sycm_activity_calendar", "backfill_sycm_activity_calendar.py", "SYCM 活动日历当前快照", platform_group="sycm"),
+    DatasetSpec("utry_overviews", "backfill_utry_overviews.py", "U先派样与复购商品数据", platform_group="utry"),
+    DatasetSpec("alimama_campaigns", "backfill_alimama_campaigns.py", "阿里妈妈计划", platform_group="alimama"),
+    DatasetSpec("alimama_crowds", "backfill_alimama_crowds.py", "阿里妈妈人群", platform_group="alimama"),
+    DatasetSpec("alimama_promotion_details", "backfill_alimama_promotion_details.py", "阿里妈妈推广明细", platform_group="alimama"),
+    DatasetSpec("alimama_adgroup_bidwords", "backfill_alimama_adgroup_bidwords.py", "阿里妈妈单元/关键词", platform_group="alimama"),
+    DatasetSpec("databank_daily", "backfill_databank_daily.py", "品牌数据银行日报", platform_group="databank"),
 )
 
 DATASET_BY_NAME = {item.name: item for item in DATASETS}
@@ -111,8 +120,8 @@ CRAWL_TASK_TYPES: dict[str, tuple[str, ...]] = {
     "alimama_promotion_details:content": ("alimama_content_promotion",),
     "alimama_adgroup_bidwords:adgroup": ("alimama_adgroups",),
     "alimama_adgroup_bidwords:bidword": ("alimama_bidwords",),
-    "databank_daily": (),
-    "sycm_market": (),
+    "databank_daily": ("databank_daily",),
+    "sycm_market": ("sycm_market",),
 }
 PROMOTION_DATASET_NAMES = frozenset({
     "cps_overviews",
@@ -201,8 +210,10 @@ def build_child_command(
         command = [
             sys.executable,
             str(Path(__file__).resolve().with_name(spec.script)),
-            "--day",
-            day.isoformat(),
+            "--start",
+            range_start.isoformat(),
+            "--end",
+            range_end.isoformat(),
             "--date-type",
             "day",
             "--session-source",
@@ -213,6 +224,8 @@ def build_child_command(
             str(browser_port),
             "--database",
             str(database_path),
+            "--skip-existing",
+            "--continue-on-error",
         ]
         return command
     if spec.supports_database:
@@ -310,21 +323,18 @@ def _resume_start_day(
     day: date,
     database_path: Path,
     mutable_refresh_days: int,
+    coverage_window_days: int = DEFAULT_COVERAGE_WINDOW_DAYS,
 ) -> date:
     latest = _latest_completed_day(spec=spec, database_path=database_path)
     next_after_latest = latest + timedelta(days=1) if latest else day
     # A later successful day does not prove that every earlier day landed.
     # Inspect a short trailing window so a missed day such as yesterday can be
     # replayed even when the database already contains a newer report.
-    audit_start = (
-        _earliest_uncovered_day(
-            spec=spec,
-            day=day,
-            database_path=database_path,
-            window_days=max(7, mutable_refresh_days),
-        )
-        if spec.name not in LATE_ARRIVING_DATASET_NAMES
-        else None
+    audit_start = _earliest_uncovered_day(
+        spec=spec,
+        day=day,
+        database_path=database_path,
+        window_days=max(coverage_window_days, mutable_refresh_days),
     )
     if audit_start is not None:
         next_after_latest = min(next_after_latest, audit_start)
@@ -341,60 +351,45 @@ def _earliest_uncovered_day(
     database_path: Path,
     window_days: int,
 ) -> date | None:
-    """Find the first unaccounted day in the recent audit window.
-
-    The crawl ledger is authoritative for explicit ``no_data`` responses;
-    otherwise every owned table must contain at least one row for the day.
-    This catches holes that a simple ``max(business_day)`` check would skip.
-    """
+    """Return the first bounded, observed coverage gap for a dataset."""
     dataset = COLLECTION_DATASET_BY_KEY.get(spec.name)
     if dataset is None or not database_path.exists() or window_days < 1:
         return None
     database = LocalDatabase(database_path)
-    start = day - timedelta(days=window_days - 1)
     try:
         with database.connect() as conn:
-            for candidate in (start + timedelta(days=offset) for offset in range(window_days)):
-                if dataset.task_types:
-                    placeholders = ",".join("?" for _ in dataset.task_types)
-                    rows = conn.execute(
-                        f"""
-                        select {q(CRAWL_TASK_TYPE)} as task_type,
-                               max({q(DAY_STATUS)}) as day_status
-                        from crawl_runs r
-                        inner join crawl_run_days d
-                          on d.{q(CRAWL_RUN_ID)} = r.{q(CRAWL_RUN_ID)}
-                        where d.{q(STORE_ID)} = ?
-                          and d.{q(BUSINESS_DAY)} = ?
-                          and r.{q(CRAWL_TASK_TYPE)} in ({placeholders})
-                          and d.{q(DAY_STATUS)} in ('ingested', 'no_data')
-                        group by {q(CRAWL_TASK_TYPE)}
-                        """,
-                        (1, candidate.isoformat(), *dataset.task_types),
-                    ).fetchall()
-                    if len(rows) == len(dataset.task_types):
-                        continue
-                table_covered = True
-                for table in dataset.tables:
-                    exists = conn.execute(
-                        "select 1 from sqlite_master where type = 'table' and name = ?",
-                        (table,),
-                    ).fetchone()
-                    if exists is None:
-                        table_covered = False
-                        break
-                    row = conn.execute(
-                        f"select 1 from {q(table)} where {q(STORE_ID)} = ? and {q(BUSINESS_DAY)} = ? limit 1",
-                        (1, candidate.isoformat()),
-                    ).fetchone()
-                    if row is None:
-                        table_covered = False
-                        break
-                if not table_covered:
-                    return candidate
+            audit = audit_dataset_coverage(
+                conn,
+                dataset,
+                target_day=day,
+                window_days=window_days,
+            )
+            return audit.backfill_start_day
     except Exception:
         return None
-    return None
+
+
+def _coverage_audit(
+    *,
+    spec: DatasetSpec,
+    day: date,
+    database_path: Path,
+    window_days: int,
+) -> DatasetGapAudit | None:
+    dataset = COLLECTION_DATASET_BY_KEY.get(spec.name)
+    if dataset is None or not database_path.exists():
+        return None
+    try:
+        database = LocalDatabase(database_path)
+        with database.connect() as conn:
+            return audit_dataset_coverage(
+                conn,
+                dataset,
+                target_day=day,
+                window_days=window_days,
+            )
+    except Exception:
+        return None
 
 
 def _commands_for_spec(
@@ -409,13 +404,25 @@ def _commands_for_spec(
     promotion_refresh_days: int = 0,
     resume_from_latest: bool = False,
     mutable_refresh_days: int = 4,
+    coverage_window_days: int = DEFAULT_COVERAGE_WINDOW_DAYS,
 ) -> list[list[str]]:
+    audit = (
+        _coverage_audit(
+            spec=spec,
+            day=day,
+            database_path=database_path,
+            window_days=max(coverage_window_days, mutable_refresh_days),
+        )
+        if resume_from_latest
+        else None
+    )
     start_day = (
         _resume_start_day(
             spec=spec,
             day=day,
             database_path=database_path,
             mutable_refresh_days=mutable_refresh_days,
+            coverage_window_days=coverage_window_days,
         )
         if resume_from_latest
         else day
@@ -433,7 +440,7 @@ def _commands_for_spec(
         session_source=session_source,
         cookie_env=cookie_env,
         browser_port=browser_port,
-        refresh_existing=refresh_existing or retry_recent,
+        refresh_existing=refresh_existing or retry_recent or bool(audit and audit.requires_refresh),
         promotion_refresh_days=promotion_refresh_days,
     )
     if spec.name not in {"alimama_adgroup_bidwords", "alimama_promotion_details"}:
@@ -499,6 +506,7 @@ def run_collection(
     promotion_refresh_days: int = 0,
     resume_from_latest: bool = False,
     mutable_refresh_days: int = 4,
+    coverage_window_days: int = DEFAULT_COVERAGE_WINDOW_DAYS,
     parallelism: int = 2,
 ) -> tuple[int, dict[str, object]]:
     if parallelism < 1:
@@ -509,6 +517,7 @@ def run_collection(
     child_env = os.environ.copy()
     child_env["PYTHONIOENCODING"] = "utf-8"
     jobs: list[tuple[DatasetSpec, list[str], str]] = []
+    platform_locks: dict[str, threading.Lock] = {}
     for spec in specs:
         for command in _commands_for_spec(
             spec,
@@ -521,6 +530,7 @@ def run_collection(
             promotion_refresh_days=promotion_refresh_days,
             resume_from_latest=resume_from_latest,
             mutable_refresh_days=mutable_refresh_days,
+            coverage_window_days=coverage_window_days,
         ):
             detail = command[-1] if spec.name in {"alimama_adgroup_bidwords", "alimama_promotion_details"} else None
             label = spec.name if detail is None else f"{spec.name}:{detail}"
@@ -528,19 +538,23 @@ def run_collection(
 
     def execute(job: tuple[DatasetSpec, list[str], str]) -> dict[str, object]:
         _spec, command, label = job
+        lock = platform_locks.setdefault(
+            _spec.platform_group or _spec.name, threading.Lock()
+        )
         print(f"[{label}] collecting {day.isoformat()} ...", flush=True)
         try:
-            completed = subprocess.run(
-                command,
-                cwd=PROJECT_ROOT,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                env=child_env,
-                timeout=timeout,
-                check=False,
-            )
+            with lock:
+                completed = subprocess.run(
+                    command,
+                    cwd=PROJECT_ROOT,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=child_env,
+                    timeout=timeout,
+                    check=False,
+                )
             result: dict[str, object] = {
                 "dataset": label,
                 "status": "completed" if completed.returncode == 0 else "failed",
@@ -626,6 +640,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Business day: YYYY-MM-DD, today, or yesterday (default: yesterday).",
     )
     parser.add_argument(
+        "--coverage-window-days",
+        type=int,
+        default=int(os.getenv("ECHO_COLLECTION_COVERAGE_WINDOW_DAYS", str(DEFAULT_COVERAGE_WINDOW_DAYS))),
+        help="Bounded observed history used to find missed business days (default: 30).",
+    )
+    parser.add_argument(
         "--datasets",
         type=_parse_dataset_names,
         default=list(DEFAULT_DATASET_NAMES),
@@ -676,6 +696,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--promotion-refresh-days must be zero or positive")
     if args.mutable_refresh_days < 1:
         parser.error("--mutable-refresh-days must be at least one")
+    if args.coverage_window_days < 1 or args.coverage_window_days > 180:
+        parser.error("--coverage-window-days must be between 1 and 180")
     if args.parallelism < 1 or args.parallelism > 8:
         parser.error("--parallelism must be between 1 and 8")
     args.database_path = args.database_path.expanduser().resolve()
@@ -694,6 +716,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             promotion_refresh_days=args.promotion_refresh_days,
             resume_from_latest=args.resume_from_latest,
             mutable_refresh_days=args.mutable_refresh_days,
+            coverage_window_days=args.coverage_window_days,
         )
     ]
     plan = {
@@ -703,6 +726,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "session_source": args.session_source,
         "datasets": list(args.datasets),
         "resume_from_latest": args.resume_from_latest,
+        "coverage_window_days": args.coverage_window_days,
         "parallelism": args.parallelism,
         "commands": commands,
     }
@@ -723,6 +747,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         promotion_refresh_days=args.promotion_refresh_days,
         resume_from_latest=args.resume_from_latest,
         mutable_refresh_days=args.mutable_refresh_days,
+        coverage_window_days=args.coverage_window_days,
         parallelism=args.parallelism,
     )
     log_dir = args.database_path.parent / "daily_collection"

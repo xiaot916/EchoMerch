@@ -19,8 +19,7 @@ export default defineConfig({
     // Listen on every network interface so devices on the same LAN can open
     // the development dashboard through this computer's LAN IP.
     host: "0.0.0.0",
-    // Port 5173 is used by another local project on this machine.
-    port: 5174,
+    port: 9568,
     proxy: {
       "/api": apiProxyTarget,
     },
@@ -29,12 +28,12 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks: {
-          charts: [
+          echartsCore: [
             "echarts/core",
-            "echarts/charts",
             "echarts/components",
             "echarts/renderers",
           ],
+          echartsCharts: ["echarts/charts"],
         },
       },
     },

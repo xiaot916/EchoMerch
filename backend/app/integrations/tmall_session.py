@@ -61,6 +61,7 @@ UTRY_DASHBOARD_LIST_API = (
 )
 UTRY_DASHBOARD_RESULT_GLOBAL = "__echoMerchUtryDashboardResult"
 ALIMAMA_RUNTIME_GLOBAL = "__echoMerchAlimamaRuntime"
+BRANDSEARCH_RUNTIME_GLOBAL = "__echoMerchBrandSearchRuntime"
 DEFAULT_BROWSER_LOGIN_TIMEOUT = 180
 
 
@@ -632,7 +633,16 @@ def _open_reusable_flow_tab(
 ) -> tuple[DrissionPageBrowser, Any, bool]:
     """Attach to an existing platform page before creating a blank tab."""
 
-    browser = DrissionPageBrowser(browser_port)
+    try:
+        browser = DrissionPageBrowser(browser_port)
+    except RuntimeSessionUnavailable as original_error:
+        # Preserve the injectable browser seam used by unit tests while
+        # keeping the production error unchanged when no debug browser exists.
+        try:
+            browser, tab = _open_flow_tab(browser_port)
+        except Exception:
+            raise original_error
+        return browser, tab, True
     existing = _find_existing_tab(browser, None, expected_hosts)
     if existing is not None:
         return browser, existing, False
@@ -829,15 +839,16 @@ class DrissionPageSessionProvider:
         self.expected_hosts = expected_hosts
 
     def read_session(self) -> RuntimeSession:
-        browser, tab = _open_flow_tab(self.browser_port)
-        existing = _find_existing_runtime_session(
-            browser,
-            tab,
-            self.expected_hosts,
+        browser, tab, owns_tab = _open_reusable_flow_tab(
+            self.browser_port, self.expected_hosts
         )
-        if existing is not None:
-            browser.close_tab(tab)
-            return existing
+        if not owns_tab:
+            try:
+                return _runtime_session_from_tab(tab)
+            except RuntimeSessionUnavailable:
+                # The matching page may still be loading or may have stale
+                # cookies. Refresh that same page instead of opening another.
+                pass
         try:
             _navigate_tab(tab, self.home_url, timeout=30)
             _wait_for_authenticated_tab(
@@ -880,7 +891,9 @@ class DrissionPageSycmTokenSessionProvider:
         self.timeout = timeout
 
     def read_context(self, *, token: str = "") -> SycmRuntimeContext:
-        browser, tab = _open_flow_tab(self.browser_port)
+        browser, tab, owns_tab = _open_reusable_flow_tab(
+            self.browser_port, ("sycm.taobao.com",)
+        )
         captured_token = token
         should_capture = not captured_token
         capture_started = False
@@ -888,19 +901,11 @@ class DrissionPageSycmTokenSessionProvider:
         # BYBT keeps its short-lived token in the already-loaded SYCM SPA.
         # Reuse that tab first so a second collector does not navigate or
         # attach another listener to the same business page.
-        existing_tab = _find_existing_tab(
-            browser,
-            tab,
-            ("sycm.taobao.com",),
-        )
-        if existing_tab is not None and should_capture:
-            captured_token = _tab_local_storage_value(existing_tab, "jycmToken")
+        if not owns_tab and should_capture:
+            captured_token = _tab_local_storage_value(tab, "jycmToken")
             should_capture = not captured_token
-        if existing_tab is not None and captured_token:
-            try:
-                session = _runtime_session_from_tab(existing_tab)
-            finally:
-                browser.close_tab(tab)
+        if not owns_tab and captured_token:
+            session = _runtime_session_from_tab(tab)
             return SycmRuntimeContext(session=session, token=captured_token)
 
         if should_capture:
@@ -1147,11 +1152,11 @@ def open_browser_platform_session(
     except KeyError as exc:
         raise ValueError(f"Unsupported collection platform: {platform_code}") from exc
 
-    browser, tab = _open_flow_tab(browser_port)
-    existing = _find_existing_platform_session(browser, tab, spec)
-    if existing is not None:
-        browser.close_tab(tab)
-        return existing
+    browser, tab, owns_tab = _open_reusable_flow_tab(browser_port, spec.hosts)
+    if not owns_tab:
+        existing = _platform_tab_session(browser, spec, assume_login_targets_platform=False)
+        if existing.authenticated or existing.page_detected:
+            return existing
 
     try:
         _navigate_tab(tab, spec.home_url, timeout=timeout)
@@ -1182,7 +1187,7 @@ def open_browser_platform_session(
         raise RuntimeSessionUnavailable(
             f"{spec.name}页面打开失败，请检查网络或在已打开的标签页中确认页面状态后重试。"
         ) from exc
-    if probe.authenticated and not keep_open_on_success:
+    if probe.authenticated and not keep_open_on_success and owns_tab:
         browser.close_tab(tab)
     return probe
 
@@ -1319,17 +1324,20 @@ class DrissionPageBrandSearchSessionProvider:
         self.timeout = timeout
 
     def read_context(self, *, csrf_id: str = "") -> BrandSearchRuntimeContext:
-        browser, tab = _open_flow_tab(self.browser_port)
+        # Reuse the existing 品销宝 page before creating a tab.  Creating a
+        # temporary blank tab first makes concurrent retries accumulate
+        # about:blank pages and also races the already-loaded SPA.
+        browser, tab, owns_tab = _open_reusable_flow_tab(
+            self.browser_port, ("branding.taobao.com", "brandsearch.taobao.com")
+        )
         captured_csrf = csrf_id
         captured_params: dict[str, str] = {}
-        existing_tab = _find_existing_tab(
-            browser,
-            tab,
-            ("branding.taobao.com", "brandsearch.taobao.com"),
-        )
-        if existing_tab is not None and captured_csrf:
-            session = _runtime_session_from_tab(existing_tab)
-            browser.close_tab(tab)
+        if not owns_tab:
+            captured_csrf = captured_csrf or _tab_window_value(
+                tab, BRANDSEARCH_RUNTIME_GLOBAL, "csrfId"
+            )
+        if captured_csrf and not owns_tab:
+            session = _runtime_session_from_tab(tab)
             return BrandSearchRuntimeContext(
                 session=session,
                 csrf_id=captured_csrf,
@@ -1365,6 +1373,8 @@ class DrissionPageBrandSearchSessionProvider:
             tab.listen.stop()
 
         if not captured_csrf:
+            if owns_tab:
+                browser.close_tab(tab)
             raise RuntimeSessionUnavailable(
                 "PZ csrfID was not observed. Open the 品销宝品牌专区报表 in the attached browser and retry."
             )
@@ -1381,7 +1391,7 @@ class DrissionPageBrandSearchSessionProvider:
             csrf_id=captured_csrf,
             query_params=captured_params,
         )
-        browser.close_tab(tab)
+        _set_tab_window_values(tab, BRANDSEARCH_RUNTIME_GLOBAL, {"csrfId": captured_csrf})
         return context
 
 

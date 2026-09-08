@@ -156,7 +156,6 @@ from app.warehouse.sycm_flow_overview import (
     load_and_parse as load_and_parse_flow_overview,
 )
 from app.warehouse.sycm_customer_overview import (
-    METRIC_PREFIX as CUSTOMER_METRIC_PREFIX,
     load_and_parse as load_and_parse_customer_overview,
 )
 from app.warehouse.sycm_member_analysis import (
@@ -563,7 +562,10 @@ class WarehouseStore:
             )
             artifact_id = self._resolve_artifact_id(conn, parsed.source_sha256, artifact_id)
             customer_metrics = {
-                metric.code.removeprefix(CUSTOMER_METRIC_PREFIX): metric.numeric_value
+                # CUSTOMER_OVERVIEW_FIELDS owns fully qualified customer.*
+                # codes. Keep the parser's namespace intact so a valid
+                # response cannot be silently persisted as an all-NULL row.
+                metric.code: metric.numeric_value
                 for metric in parsed.metrics
             }
             self._upsert_daily_fact_row(

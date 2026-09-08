@@ -132,6 +132,9 @@ class Diagnosis(BaseModel):
     findings: list[DiagnosisFinding] = Field(default_factory=list)
     actions: list[RecommendedAction] = Field(default_factory=list)
     artifacts: list[ArtifactSpec] = Field(default_factory=list)
+    # An inspectable plan makes multi-step Agent behaviour auditable.  The
+    # UI may render this directly or use execution_steps for a compact view.
+    analysis_plan: dict[str, Any] = Field(default_factory=dict)
     # Stable analysis contract consumed by the model, API clients and UI.
     analysis_scope: dict[str, Any] = Field(default_factory=dict)
     coverage: CoverageSummary = Field(default_factory=CoverageSummary)

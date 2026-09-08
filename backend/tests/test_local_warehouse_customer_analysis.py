@@ -44,6 +44,11 @@ def test_customer_analysis_uses_latest_non_empty_shop_customer_value(tmp_path: P
 
     assert snapshot.customer.shop_customers == 47914
     assert snapshot.customer.shop_customers_stat_date == date(2026, 8, 18)
+    assert snapshot.customer.expected_days == 3
+    assert snapshot.customer.covered_days == 1
+    assert snapshot.customer.first_covered_date == date(2026, 8, 18)
+    assert snapshot.customer.latest_covered_date == date(2026, 8, 18)
+    assert snapshot.customer.missing_dates == [date(2026, 8, 19), date(2026, 8, 20)]
     assert [row.stat_date for row in snapshot.customer.daily_metrics] == [date(2026, 8, 18)]
     assert [(item.label, item.reached, item.buyers) for item in snapshot.customer.segments] == [
         ("新访", 100, 10),

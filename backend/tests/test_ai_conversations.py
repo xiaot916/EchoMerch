@@ -83,9 +83,9 @@ def test_only_explicit_follow_up_references_expand_previous_context() -> None:
 
     follow_up = AnalysisRequest(question="按上面的方案把预算改成 60 万", use_model=False)
     expanded = AIAnalysisService._contextual_request(follow_up, state).question
-    assert "已确认规划输入" in expanded
-    assert "500000" in expanded
-    assert expanded.endswith("当前追问：按上面的方案把预算改成 60 万")
+    assert expanded == "按上面的方案把预算改成 60 万"
+    context = AIAnalysisService._contextual_request(follow_up, state).page_context["conversation_context"]
+    assert context["planning_inputs"]["total_budget"] == 500000
 
     short_follow_up = AnalysisRequest(question="哪个最严重？", use_model=False)
-    assert "上一轮结论" in AIAnalysisService._contextual_request(short_follow_up, state).question
+    assert AIAnalysisService._contextual_request(short_follow_up, state).page_context["conversation_context"]["headline"] == "全站推广优先"

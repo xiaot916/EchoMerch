@@ -436,6 +436,11 @@ class AnalysisDailyMetric(BaseModel):
 
 
 class CustomerAnalysis(BaseModel):
+    expected_days: int = 0
+    covered_days: int = 0
+    first_covered_date: date | None = None
+    latest_covered_date: date | None = None
+    missing_dates: list[date] = Field(default_factory=list)
     shop_customers: int | None = None
     shop_customers_stat_date: date | None = None
     new_customers: int = 0

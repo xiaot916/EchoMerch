@@ -1,10 +1,14 @@
+import json
 from datetime import date
 from pathlib import Path
 import sqlite3
 from urllib.parse import parse_qs, urlparse
 
+import pytest
+
 from app.core.local_database import LocalDatabase
 from app.warehouse.databank import ingest_snapshot, parse_payload
+from scripts import fetch_databank_daily
 from scripts.fetch_databank_daily import _homepage_query
 
 
@@ -86,6 +90,39 @@ def test_new_homepage_query_uses_daily_contract() -> None:
     assert query["dateType"] == ["d"]
     assert query["ds"] == ["20260820"]
     assert query["xcatId"] == ["-999"]
+
+
+def test_databank_persists_platform_error_responses_before_failing(
+    monkeypatch, tmp_path: Path
+) -> None:
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {"data": None, "errCode": 477012030108, "errMsg": "param illegal", "codeClass": "CLIENT_ERROR"}
+            ).encode("utf-8")
+
+    monkeypatch.setattr(fetch_databank_daily, "urlopen", lambda request, timeout: Response())
+    output = tmp_path / "databank-error.json"
+
+    with pytest.raises(RuntimeError, match="param illegal"):
+        fetch_databank_daily.fetch_databank_daily(
+            business_day=date(2026, 9, 1),
+            output=output,
+            cookie="t=runtime-session",
+            csrf_token="csrf",
+        )
+
+    saved = json.loads(output.read_text(encoding="utf-8"))
+    assert saved["core"]["errCode"] == 477012030108
+    assert saved["homepage_panel"]["errMsg"] == "param illegal"
 
 
 def test_databank_ingest_is_idempotent(tmp_path: Path) -> None:

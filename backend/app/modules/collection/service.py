@@ -36,6 +36,11 @@ from app.modules.collection.registry import (
     CollectionDataset,
 )
 from app.modules.collection.locks import active_feedback_run
+from app.modules.collection.coverage import (
+    DEFAULT_COVERAGE_WINDOW_DAYS,
+    REQUIRED_TABLE_FILTERS,
+    audit_dataset_coverage,
+)
 from app.modules.collection.schemas import (
     CollectionBatch,
     CollectionBatchFailure,
@@ -227,7 +232,7 @@ class CollectionService:
         self._reconcile_stale_batches()
         with self.database.connect() as conn:
             rows = conn.execute(
-                "select * from collection_batches order by datetime(started_at) desc limit ?",
+                "select * from collection_batches order by started_at desc limit ?",
                 (limit,),
             ).fetchall()
         return [self._batch_from_row(row) for row in rows]
@@ -340,6 +345,20 @@ class CollectionService:
             seen_task_types.add(task_type)
             latest_attempts.append(row)
         statuses = {str(row["day_status"]) for row in latest_attempts if row["day_status"]}
+        all_tasks_succeeded = (
+            bool(dataset.task_types)
+            and all(
+                any(
+                    str(
+                        (row["task_type"] if "task_type" in row.keys() else task_type)
+                        or task_type
+                    ) == task_type
+                    and str(row["day_status"] or "") in {"ingested", "no_data"}
+                    for row in latest_attempts
+                )
+                for task_type in dataset.task_types
+            )
+        )
         last_run_status = str(latest_attempts[0]["run_status"]) if latest_attempts and latest_attempts[0]["run_status"] else None
         error = next((str(row["error_message"]) for row in latest_attempts if row["error_message"]), None)
         # A worker can fail during browser/session preflight, before it has a
@@ -366,6 +385,25 @@ class CollectionService:
             and any(table.raw_row_count > 0 and not table.present for table in table_states)
         ):
             error = error or "接口已返回店铺级数据，但活动级新客指标为空，尚未形成完整日报。"
+        if (
+            dataset.key == "sycm_customer_overviews"
+            and any(table.raw_row_count > 0 and not table.present for table in table_states)
+        ):
+            error = error or "客户概览接口已返回占位行，但新访、回访或复购核心指标为空，尚未形成完整日报。"
+
+        # A successful component report can have no rows by design, such as a
+        # date with promotion adgroups but no bidwords. Dataset registration
+        # owns that rule so display status and the shared gap planner agree.
+        if dataset.empty_report_tables and all_tasks_succeeded:
+            for table in table_states:
+                if (
+                    table.table in dataset.empty_report_tables
+                    and not table.present
+                    and table.raw_row_count == 0
+                ):
+                    table.present = True
+                    table.status = "no_data"
+            present_count = sum(table.present for table in table_states)
 
         # U先 returns the two reports independently.  A successful report with
         # zero rows is an explicit platform no-data result for that sub-table;
@@ -392,7 +430,17 @@ class CollectionService:
                     table.present = True
                     table.status = "no_data"
             present_count = sum(table.present for table in table_states)
-        if dataset.key == "utry_overviews" and table_states and all(
+        qps_limited = any(
+            self._is_qps_limited_error(str(row["error_message"] or ""))
+            for row in latest_attempts
+        )
+        if "running" in {str(row["run_status"]) for row in latest_attempts}:
+            status = "collecting"
+        elif batch_failure is not None:
+            status = "failed"
+        elif qps_limited:
+            status = "failed"
+        elif dataset.key == "utry_overviews" and table_states and all(
             table.status == "no_data" for table in table_states
         ):
             status = "no_data"
@@ -405,16 +453,42 @@ class CollectionService:
             and any(table.status == "partial" for table in table_states)
         ):
             status = "partial"
-        elif "running" in {str(row["run_status"]) for row in latest_attempts}:
-            status = "collecting"
-        elif batch_failure is not None:
-            status = "failed"
+        elif (
+            dataset.key in {"sycm_customer_overviews", "sycm_new_customer_discount"}
+            and any(table.status == "partial" for table in table_states)
+        ):
+            status = "partial"
         elif any(value.endswith("failed") for value in statuses):
             status = "failed"
         elif dataset.allow_no_data and "no_data" in statuses:
             status = "no_data"
         else:
             status = "missing"
+
+        audit = None
+        if hasattr(conn, "execute"):
+            try:
+                audit = audit_dataset_coverage(
+                    conn,
+                    dataset,
+                    target_day=day,
+                    window_days=DEFAULT_COVERAGE_WINDOW_DAYS,
+                    store_id=settings.default_store_id or 1,
+                )
+            except Exception:
+                # Coverage details are supplementary to the legacy day status;
+                # keep isolated unit doubles and older databases functional.
+                audit = None
+            # Calendar-like snapshots represent a full replacement, rather
+            # than a fact row for every calendar day. A successful snapshot
+            # run that owns the day is authoritative even when the table has
+            # no row with that exact date.
+            if dataset.collection_mode == "coverage_snapshot" and audit.current.resolved:
+                status = audit.current.status
+            if audit.gap_dates and status in {"complete", "no_data"}:
+                status = "partial"
+                gap_range = self._format_gap_dates(audit.gap_dates)
+                error = f"近 {DEFAULT_COVERAGE_WINDOW_DAYS} 日存在连续覆盖缺口：{gap_range}；已纳入下次补采。"
 
         # A later successful ingestion is authoritative for the coverage
         # view. Keep prior task failures in the run history, but do not attach
@@ -438,8 +512,32 @@ class CollectionService:
             last_attempt_at=last_attempt,
             last_run_status=last_run_status,
             error_message=error,
+            coverage_window_start=audit.window_start.isoformat() if audit else None,
+            contiguous_latest_date=(
+                audit.contiguous_latest_day.isoformat()
+                if audit and audit.contiguous_latest_day else None
+            ),
+            backfill_start_date=(
+                audit.backfill_start_day.isoformat()
+                if audit and audit.backfill_start_day else None
+            ),
+            gap_count=len(audit.gap_dates) if audit else 0,
+            missing_dates=[item.isoformat() for item in audit.gap_dates] if audit else [],
             tables=table_states,
         )
+
+    @staticmethod
+    def _is_qps_limited_error(error_message: str | None) -> bool:
+        normalized = (error_message or "").lower()
+        return "qps" in normalized or "code 1800" in normalized or "code=1800" in normalized
+
+    @staticmethod
+    def _format_gap_dates(days: tuple[date, ...]) -> str:
+        if not days:
+            return ""
+        if len(days) == 1:
+            return days[0].isoformat()
+        return f"{days[0].isoformat()} 至 {days[-1].isoformat()}（{len(days)} 天）"
 
     @staticmethod
     def _coverage_error_message(error: str | None) -> str | None:
@@ -464,7 +562,7 @@ class CollectionService:
         rows = conn.execute(
             "select started_at, status, log_file, dataset_names_json "
             "from collection_batches where business_day = ? "
-            "order by datetime(started_at) desc",
+            "order by started_at desc",
             (day.isoformat(),),
         ).fetchall()
         for row in rows:
@@ -524,42 +622,7 @@ class CollectionService:
             return DatasetTableCoverage(table=table, present=False, status="missing")
         where = f"where {q(STORE_ID)} = ? and {q(BUSINESS_DAY)} = ?"
         parameters: tuple[object, ...] = (settings.default_store_id or 1, day.isoformat())
-        required_filter = ""
-        if table == "store_daily_bybt_overviews":
-            # A successful HTTP response can contain only the online-item
-            # placeholder while traffic and transaction metrics are absent.
-            # Such a row is not daily coverage and must remain retryable.
-            required_filter = (
-                ' and "百补访客数" is not null'
-                ' and "百补支付买家数" is not null'
-                ' and "百补支付金额" is not null'
-                ' and "百补子订单数" is not null'
-                ' and "百补支付成交件数" is not null'
-            )
-        elif table == "store_daily_new_customer_discount_overviews":
-            # The endpoint may return only the shop-level new-customer
-            # comparison. That row is partial and must remain retryable until
-            # the four activity-level fields arrive.
-            required_filter = (
-                ' and "商品新访客数" is not null'
-                ' and "新客支付人数" is not null'
-                ' and "新客支付金额" is not null'
-                ' and "新客支付转化率" is not null'
-            )
-        elif table == "store_daily_taobao_flash_sale_overviews":
-            # An HTTP 200 empty response is a valid platform no-data result,
-            # but a row containing only NULL metrics is not daily coverage.
-            # Keep it retryable unless the crawl run explicitly records
-            # ``no_data``.
-            required_filter = (
-                ' and "活动中商品量级" is not null'
-                ' and "活动商品IPV" is not null'
-                ' and "活动商品IPVUV" is not null'
-                ' and "活动商品成交笔数" is not null'
-                ' and "活动商品成交金额" is not null'
-                ' and "活动商品引导店铺新客" is not null'
-                ' and "活动商品最高爆发系数" is not null'
-            )
+        required_filter = REQUIRED_TABLE_FILTERS.get(table, "")
         where += required_filter
         raw_row = conn.execute(
             f"select count(*) as row_count from {q(table)} "
@@ -1115,7 +1178,7 @@ class CollectionService:
 
     def _latest_batch(self, conn) -> CollectionBatch | None:
         row = conn.execute(
-            "select * from collection_batches order by datetime(started_at) desc limit 1"
+            "select * from collection_batches order by started_at desc limit 1"
         ).fetchone()
         return self._batch_from_row(row, conn=conn) if row else None
 

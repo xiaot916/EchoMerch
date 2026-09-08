@@ -12,7 +12,22 @@ import type { DecisionMetric } from "@/types"
 const { dashboard, loading } = useDashboard()
 const customer = computed(() => dashboard.value?.analysis?.customer)
 const derivedById = computed(() => new Map((customer.value?.derived_metrics ?? []).map((item) => [item.id, item])))
-const customerDays = computed(() => customer.value?.daily_metrics.length ?? 0)
+const customerCoverage = computed(() => {
+  const value = customer.value
+  if (!value) return "0/0 天"
+  return `${value.covered_days}/${value.expected_days} 天`
+})
+const customerDateRange = computed(() => {
+  const value = customer.value
+  if (!value?.first_covered_date || !value.latest_covered_date) return "暂无有效日期"
+  return `${value.first_covered_date.slice(5)} 至 ${value.latest_covered_date.slice(5)}`
+})
+const customerMissingRange = computed(() => {
+  const missing = customer.value?.missing_dates ?? []
+  if (!missing.length) return ""
+  if (missing.length === 1) return missing[0].slice(5)
+  return `${missing[0].slice(5)} 至 ${missing[missing.length - 1].slice(5)}（${missing.length} 天）`
+})
 
 function derived(id: string): DecisionMetric | undefined { return derivedById.value.get(id) }
 function derivedValue(id: string): number | null { return derived(id)?.status === "available" ? derived(id)?.value ?? null : null }
@@ -75,7 +90,7 @@ const segmentOption = computed(() => {
       <MetricCard label="老客客单指数" :value="optionalRatio(derivedValue('repeat_unit_price_index'))" :detail="`首购 ${currency(derivedValue('first_purchase_unit_price'))} · 老客 ${currency(derivedValue('repeat_unit_price'))}`" :icon="Scale" tone="coral" definition="100% 表示老客与首次购买客单相同，高于 100% 表示老客客单更高。" />
     </section>
 
-    <section class="customer-scope-strip"><span>客户有效数据 {{ customerDays }} 天</span><span>首次购买 = 总支付 - 老客复购</span><span>人数为每日累计，非跨日去重</span><span>店铺客户存量 {{ number(customer.shop_customers) }}{{ customer.shop_customers_stat_date ? ` · 截至 ${customer.shop_customers_stat_date}` : "" }}</span></section>
+    <section class="customer-scope-strip"><span>当前范围：客户有效指标 {{ customerCoverage }}</span><span>有效日期：{{ customerDateRange }}</span><span v-if="customerMissingRange">未纳入趋势和汇总：{{ customerMissingRange }}</span><span>首次购买 = 总支付 - 老客复购</span><span>人数为每日累计，非跨日去重</span><span>店铺客户存量 {{ number(customer.shop_customers) }}{{ customer.shop_customers_stat_date ? ` · 截至 ${customer.shop_customers_stat_date}` : "" }}</span></section>
 
     <section class="decision-chart-grid">
       <article class="panel"><div class="panel-heading"><div><h2>首次购买与老客金额趋势</h2></div></div><BusinessChart :option="amountTrendOption" ariaLabel="首次购买与老客复购金额趋势图" :height="330" /></article>

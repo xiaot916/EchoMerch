@@ -2060,6 +2060,10 @@ class LocalDatabase:
                         "insert into schema_version(version, applied_at) values (?, ?)",
                         (self.SCHEMA_VERSION, datetime.now().astimezone().isoformat(timespec="seconds")),
                     )
+                # Keep performance indexes idempotent and independent from the
+                # full schema migration. This lets existing installations pick
+                # up query improvements without rebuilding business tables.
+                self._ensure_runtime_indexes(conn)
                 conn.execute("pragma foreign_keys = on")
                 conn.commit()
                 self._initialized_paths.add(self.database_path)
@@ -2069,6 +2073,20 @@ class LocalDatabase:
             finally:
                 if should_close:
                     conn.close()
+
+    @staticmethod
+    def _ensure_runtime_indexes(conn: sqlite3.Connection) -> None:
+        """Add low-risk lookup indexes used by collection/status screens."""
+        conn.executescript(
+            """
+            create index if not exists idx_collection_batches_status_day
+                on collection_batches(status, business_day, started_at desc);
+            create index if not exists idx_collection_batches_finished
+                on collection_batches(finished_at desc);
+            create index if not exists idx_crawl_runs_status_task
+                on crawl_runs("运行状态", "采集任务类型", "开始时间" desc);
+            """
+        )
 
     def recluster_daily_fact_tables(
         self,

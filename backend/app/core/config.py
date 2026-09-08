@@ -120,7 +120,7 @@ settings = Settings(
     legacy_database_url=os.getenv("LEGACY_DATABASE_URL"),
     cors_origins=_csv_env(
         "ECHO_CORS_ORIGINS",
-        "http://localhost:5174,http://127.0.0.1:5174,http://localhost:5173,http://127.0.0.1:5173",
+        "http://localhost:9568,http://127.0.0.1:9568",
     ),
     local_database_path=_project_path_env(
         "ECHO_LOCAL_DATABASE_PATH",

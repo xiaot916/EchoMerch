@@ -1592,7 +1592,22 @@ class LocalWarehouseAnalyticsRepository:
                order by c."业务日期"''',
             self._store_id, start_date.isoformat(), end_date.isoformat(),
         )
+        covered_customer_dates = [
+            date.fromisoformat(str(item["business_day"])) for item in daily_rows
+        ]
+        covered_customer_date_set = set(covered_customer_dates)
+        expected_customer_days = (end_date - start_date).days + 1
+        missing_customer_dates = [
+            start_date + timedelta(days=offset)
+            for offset in range(expected_customer_days)
+            if start_date + timedelta(days=offset) not in covered_customer_date_set
+        ]
         return CustomerAnalysis(
+            expected_days=expected_customer_days,
+            covered_days=len(covered_customer_dates),
+            first_covered_date=min(covered_customer_dates) if covered_customer_dates else None,
+            latest_covered_date=max(covered_customer_dates) if covered_customer_dates else None,
+            missing_dates=missing_customer_dates,
             shop_customers=(
                 None
                 if shop_customers_value in (None, "")

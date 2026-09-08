@@ -11,6 +11,7 @@ import httpx
 from app.core.config import settings
 from app.modules.ai.configuration import AIConfig, get_ai_config
 from app.modules.ai.schemas import Diagnosis
+from app.modules.ai.context_budget import build_model_messages
 
 
 class AIProviderError(RuntimeError):
@@ -53,6 +54,8 @@ class AgnesProvider:
         elif analysis_mode:
             base += (
                 "当前页面会同时展示结构化证据和动作卡片。你必须综合所有 mcp_results，而不是只看主 Skill 的第一条结果；"
+                "若 diagnosis.analysis_plan 存在，先遵守其中的分析目标、比较窗口、排序指标和完成条件；它是本轮工具编排后的事实契约，不能用历史结论或当前期绝对值替代其中的比较。"
+                "渠道增长问题必须按同一渠道的当前窗口减前序等长窗口，以支付金额绝对增量排序；一级流量来源、推广归因、直播和会员可能重叠，不能相加或互相替代。"
                 "analysis_context.store_fact_sheet 是跨域事实摘要：优先用其中的 core_metrics、consistency_checks 和 domains 排序判断，再用 mcp_results 的明细解释原因；"
                 "domains 中的 records 是证据记录数，不是金额或用户数；domains.time_scope 明确区分周期、静态快照和事件明细：静态/事件数据已返回不等于它有完整历史趋势，不能写成全周期覆盖或用来单独证明变化原因；带有‘仅为证据样本’的截断列表不能当作全量；"
                 "先排序最重要的 1-3 个原因，再说明每个原因对应的跨域证据、证据强度和待验证项。"
@@ -152,40 +155,15 @@ class AgnesProvider:
     ) -> str:
         if not self.configured:
             raise AIProviderError("Agnes API key is not configured")
-
-        analysis_context = dict(context or {})
-        recent_messages = analysis_context.pop("recent_messages", [])
-        messages = [
-            {
-                "role": "system",
-                "content": self._system_prompt(report_mode=bool(analysis_context.get("report_type")), analysis_mode=bool(analysis_context.get("analysis_mode"))),
-            }
-        ]
-        if isinstance(recent_messages, list):
-            for item in recent_messages[-6:]:
-                if not isinstance(item, dict) or item.get("role") not in {"user", "assistant"}:
-                    continue
-                content = str(item.get("text") or "").strip()
-                if content:
-                    messages.append({"role": item["role"], "content": content[:4000]})
-        messages.append(
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "question": question,
-                        "diagnosis": diagnosis.model_dump(mode="json"),
-                        "evidence": evidence,
-                        # The model narrates a deterministic calculation;
-                        # it receives the structured result and its limits
-                        # so it cannot fill gaps from prose alone.
-                        "mcp_results": mcp_results or [],
-                        "analysis_context": analysis_context,
-                    },
-                    ensure_ascii=False,
-                ),
-            }
+        context_result = build_model_messages(
+            system_prompt=self._system_prompt(report_mode=bool((context or {}).get("report_type")), analysis_mode=bool((context or {}).get("analysis_mode"))),
+            question=question,
+            diagnosis=diagnosis.model_dump(mode="json"),
+            evidence=evidence,
+            mcp_results=mcp_results or [],
+            context=context,
         )
+        messages = context_result.messages
         payload = {
             "model": self._config().model,
             "temperature": 0.2,
@@ -220,35 +198,15 @@ class AgnesProvider:
         """Yield model text deltas from an OpenAI-compatible SSE response."""
         if not self.configured:
             raise AIProviderError("Agnes API key is not configured")
-
-        analysis_context = dict(context or {})
-        recent_messages = analysis_context.pop("recent_messages", [])
-        messages = [
-            {
-                "role": "system",
-                "content": self._system_prompt(report_mode=bool(analysis_context.get("report_type")), analysis_mode=bool(analysis_context.get("analysis_mode"))),
-            }
-        ]
-        if isinstance(recent_messages, list):
-            for item in recent_messages[-6:]:
-                if not isinstance(item, dict) or item.get("role") not in {"user", "assistant"}:
-                    continue
-                content = str(item.get("text") or "").strip()
-                if content:
-                    messages.append({"role": item["role"], "content": content[:4000]})
-        messages.append({
-            "role": "user",
-            "content": json.dumps(
-                {
-                    "question": question,
-                    "diagnosis": diagnosis.model_dump(mode="json"),
-                    "evidence": evidence,
-                    "mcp_results": mcp_results or [],
-                    "analysis_context": analysis_context,
-                },
-                ensure_ascii=False,
-            ),
-        })
+        context_result = build_model_messages(
+            system_prompt=self._system_prompt(report_mode=bool((context or {}).get("report_type")), analysis_mode=bool((context or {}).get("analysis_mode"))),
+            question=question,
+            diagnosis=diagnosis.model_dump(mode="json"),
+            evidence=evidence,
+            mcp_results=mcp_results or [],
+            context=context,
+        )
+        messages = context_result.messages
         config = self._config()
         payload = {"model": config.model, "temperature": 0.2, "max_tokens": 3500, "stream": True, "messages": messages}
         try:

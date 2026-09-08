@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue"
-import { Bot, CheckCircle2, ChevronRight, Clock3, LoaderCircle, Send, Sparkles, TriangleAlert, X } from "lucide-vue-next"
-import { streamAnalyzeWithAI } from "@/api"
+import { computed, onBeforeUnmount, ref, watch } from "vue"
+import { Bot, CheckCircle2, ChevronRight, Clock3, LoaderCircle, Send, Sparkles, Square, TriangleAlert, X } from "lucide-vue-next"
+import { cancelAIStream, streamAnalyzeWithAI } from "@/api"
 import type { AIStreamEvent } from "@/api"
 import type { AIAnalysisResponse, AIDomain, AIPageProfile } from "@/types"
 import { renderMarkdown } from "@/utils/markdown"
+import { useAIStreamStatus } from "@/composables/useAIStreamStatus"
 
 const props = withDefaults(defineProps<{
   open: boolean
@@ -30,6 +31,11 @@ const activeSkill = ref<AIAnalysisResponse["skill"] | null>(null)
 const supportingSkills = ref<AIAnalysisResponse["supporting_skills"]>([])
 const conversationId = ref<string | null>(null)
 const lastRunToken = ref(0)
+const abortController = ref<AbortController | null>(null)
+const streamStatus = useAIStreamStatus()
+const streamStatusTitle = streamStatus.title
+const streamStatusDetail = streamStatus.detail
+const streamElapsedMs = streamStatus.elapsedMs
 const resolvedPageKey = computed(() => props.pageKey || props.profile?.key || "global")
 const resolvedDomain = computed<AIDomain>(() => props.profile?.domain || props.domain)
 const conversationStorageKey = computed(() => `echomerch.ai.drawer.conversation.v2:${props.storeId || "global"}:${resolvedPageKey.value}`)
@@ -115,10 +121,15 @@ async function ask(value = question.value): Promise<void> {
   streamSteps.value = []
   activeSkill.value = null
   supportingSkills.value = []
+  abortController.value?.abort()
+  const controller = new AbortController()
+  abortController.value = controller
+  streamStatus.start()
   try {
     result.value = await streamAnalyzeWithAI(
       { question: text, conversation_id: conversationId.value, store_id: props.storeId, start_date: props.startDate, end_date: props.endDate, domain: resolvedDomain.value, page_key: resolvedPageKey.value, page_context: { ...props.pageContext, page: props.title, route: window.location.pathname }, use_model: true },
       (event: AIStreamEvent) => {
+        streamStatus.accept(event)
         if (event.event === "token" && event.text) streamText.value += event.text
         if (event.event === "skill") {
           activeSkill.value = event.skill || null
@@ -130,10 +141,12 @@ async function ask(value = question.value): Promise<void> {
           else streamSteps.value.push({ kind: event.event, name: event.name || event.event, status: event.status || "running", detail: event.detail || "" })
         }
       },
+      controller.signal,
     )
     conversationId.value = result.value.conversation_id || conversationId.value
     if (conversationId.value) localStorage.setItem(conversationStorageKey.value, conversationId.value)
   } catch (err) {
+    if (controller.signal.aborted) return
     const message = err instanceof Error ? err.message : "分析失败"
     if (conversationId.value && /(?:会话不存在|不属于当前账号|请求失败：400|请求失败：404)/.test(message)) {
       // A stale ID can happen after account or local database changes.
@@ -142,16 +155,38 @@ async function ask(value = question.value): Promise<void> {
     }
     error.value = message
   } finally {
-    loading.value = false
+    if (abortController.value === controller) {
+      abortController.value = null
+      if (!controller.signal.aborted) streamStatus.finish("complete")
+      loading.value = false
+    }
   }
 }
 
+function cancelAsk() {
+  if (!loading.value) return
+  streamStatus.cancel()
+  const runId = streamStatus.runId.value
+  if (runId) void cancelAIStream(runId, props.storeId).catch(() => undefined)
+  abortController.value?.abort()
+  loading.value = false
+}
+
 watch(conversationStorageKey, (key) => {
+  abortController.value?.abort()
+  abortController.value = null
+  streamStatus.finish("cancelled")
   conversationId.value = localStorage.getItem(key)
   result.value = null
   error.value = ""
   question.value = ""
 }, { immediate: true })
+
+watch(() => props.open, (open) => {
+  if (!open) cancelAsk()
+})
+
+onBeforeUnmount(cancelAsk)
 
 watch([() => props.open, () => props.runToken], ([open, token]) => {
   if (!open || !token || token === lastRunToken.value || !props.runQuestion.trim()) return
@@ -167,7 +202,7 @@ watch([() => props.open, () => props.runToken], ([open, token]) => {
       <div v-if="!result && !loading" class="ai-assistant-welcome"><Bot :size="28" /><strong>把当前页面的数据变成行动</strong><p>{{ profile?.goal || "问题会自动带上当前店铺、日期和业务上下文。" }}</p></div>
       <button v-if="!result && !loading" class="ai-page-diagnose" type="button" @click="ask(diagnosticQuestion)"><Sparkles :size="15" /><span><b>生成本页经营诊断</b><small>结果、原因、机会风险与行动卡</small></span><ChevronRight :size="15" /></button>
       <div v-if="!result && !loading" class="ai-quick-list"><button v-for="item in quickQuestions" :key="item" @click="ask(item)">{{ item }}<ChevronRight :size="14" /></button></div>
-        <section v-if="loading" class="ai-loading ai-drawer-agent-loading"><div class="ai-thinking-head"><LoaderCircle :size="22" class="spinning" /><div><strong>{{ streamText ? "正在流式生成回答" : "正在执行分析能力" }}</strong><small>实时展示可审计的能力与数据调用</small></div></div><div v-if="activeSkill" class="ai-agent-capabilities"><span>主 Agent</span><b>{{ activeSkill.display_name }}</b><em v-for="skill in supportingSkills" :key="skill.name">{{ skill.display_name }}</em></div><div v-if="streamSteps.length" class="ai-live-step-list"><div v-for="(step, index) in streamSteps" :key="`${step.kind}-${step.name}-${index}`" :class="`is-${step.status}`"><LoaderCircle v-if="step.status === 'running'" :size="13" class="spinning" /><CheckCircle2 v-else-if="step.status === 'completed'" :size="13" /><TriangleAlert v-else-if="step.status === 'failed'" :size="13" /><Clock3 v-else :size="13" /><span><b>{{ streamStepLabel(step) }}</b><small>{{ step.detail }}</small></span></div></div><div v-if="streamText" class="ai-stream-answer ai-markdown-content" v-html="cleanAnswer(streamText)"></div></section>
+        <section v-if="loading" class="ai-loading ai-drawer-agent-loading"><div class="ai-thinking-head"><LoaderCircle :size="22" class="spinning" /><div><strong>{{ streamStatusTitle }}</strong><small>{{ streamStatusDetail }} · 已用 {{ Math.round(streamElapsedMs / 1000) }}秒</small></div><button type="button" class="ai-stream-stop" title="停止生成" @click="cancelAsk"><Square :size="14" />停止</button></div><div v-if="activeSkill" class="ai-agent-capabilities"><span>主 Agent</span><b>{{ activeSkill.display_name }}</b><em v-for="skill in supportingSkills" :key="skill.name">{{ skill.display_name }}</em></div><div v-if="streamSteps.length" class="ai-live-step-list"><div v-for="(step, index) in streamSteps" :key="`${step.kind}-${step.name}-${index}`" :class="`is-${step.status}`"><LoaderCircle v-if="step.status === 'running'" :size="13" class="spinning" /><CheckCircle2 v-else-if="step.status === 'completed'" :size="13" /><TriangleAlert v-else-if="step.status === 'failed'" :size="13" /><Clock3 v-else :size="13" /><span><b>{{ streamStepLabel(step) }}</b><small>{{ step.detail }}</small></span></div></div><div v-if="streamText" class="ai-stream-answer ai-markdown-content" v-html="cleanAnswer(streamText)"></div></section>
       <section v-if="error" class="ai-error">{{ error }}</section>
       <section v-if="result" class="ai-result">
         <div class="ai-status-line"><span :class="`ai-status-${result.status}`">{{ result.status === "partial" ? "部分数据" : result.status === "no_data" ? "暂无数据" : "已完成" }}</span><small>{{ result.skill.display_name }} · 置信度 {{ result.diagnosis.confidence === "high" ? "高" : result.diagnosis.confidence === "low" ? "低" : "中" }}</small></div>

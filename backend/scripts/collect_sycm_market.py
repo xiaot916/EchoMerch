@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +24,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "backend"))
 
 from app.core.config import settings  # noqa: E402
 from app.integrations.tmall_session import resolve_runtime_session  # noqa: E402
+from app.modules.imports.crawl_run_store import CrawlRunStore  # noqa: E402
 
 
 MARKET_TABLE = "sycm_market_rankings"
@@ -31,6 +32,9 @@ KEYWORD_TABLE = "sycm_market_keywords"
 PARENT_CATE_ID = "50014812"
 CATE_ID = "201207402"
 CATE_FLAG = "1"
+DEFAULT_STORE_NAME = "碧芭宝贝旗舰店"
+DEFAULT_PLATFORM_STORE_ID = "2200573698992"
+DEFAULT_OUTPUT_DIR = Path(settings.local_database_path).parent / "raw_responses" / "sycm_market"
 
 
 def _v(value: Any) -> str | None:
@@ -58,6 +62,7 @@ def _request_json(
     referer: str,
     max_attempts: int = 8,
     request_delay: float = 1.2,
+    raw_responses: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     params = dict(params)
     last_error: Exception | None = None
@@ -83,11 +88,29 @@ def _request_json(
             if not body.strip():
                 raise ValueError("SYCM returned an empty response")
             payload = json.loads(body.decode("utf-8-sig"))
+            if raw_responses is not None:
+                raw_responses.append({
+                    "path": path,
+                    "params": params,
+                    "http_status": response.status,
+                    "payload": payload,
+                })
             if not isinstance(payload, dict) or int(payload.get("code", -1)) != 0:
                 raise RuntimeError(f"SYCM request failed: {payload!r}")
             if request_delay:
                 time.sleep(request_delay)
             return payload
+        except HTTPError as exc:
+            if raw_responses is not None:
+                raw_responses.append({
+                    "path": path,
+                    "params": params,
+                    "http_status": exc.code,
+                    "raw_body": exc.read().decode("utf-8", errors="replace"),
+                })
+            last_error = exc
+            if attempt == max_attempts - 1:
+                raise RuntimeError(f"SYCM request failed after {max_attempts} attempts: {last_error}") from exc
         except (URLError, TimeoutError, ConnectionError, UnicodeDecodeError, json.JSONDecodeError, ValueError, RuntimeError) as exc:
             last_error = exc
             if attempt == max_attempts - 1:
@@ -119,7 +142,15 @@ def _base_params(start: str, end: str, date_type: str) -> dict[str, str]:
     }
 
 
-def collect_rankings(*, day: date, date_type: str, cookie: str, max_attempts: int, request_delay: float) -> list[dict[str, Any]]:
+def collect_rankings(
+    *,
+    day: date,
+    date_type: str,
+    cookie: str,
+    max_attempts: int,
+    request_delay: float,
+    raw_responses: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     start, end = _period(day, date_type)
     referer = f"https://sycm.taobao.com/mc/free/market_rank?dateRange={start}%7C{end}&dateType={date_type}&parentCateId={PARENT_CATE_ID}&cateId={CATE_ID}&cateFlag={CATE_FLAG}"
     specs = (
@@ -131,7 +162,15 @@ def collect_rankings(*, day: date, date_type: str, cookie: str, max_attempts: in
     for rank_type, path, extra in specs:
         page = 1
         while True:
-            payload = _request_json(path, {**_base_params(start, end, date_type), **extra, "page": str(page)}, cookie=cookie, referer=referer, max_attempts=max_attempts, request_delay=request_delay)
+            payload = _request_json(
+                path,
+                {**_base_params(start, end, date_type), **extra, "page": str(page)},
+                cookie=cookie,
+                referer=referer,
+                max_attempts=max_attempts,
+                request_delay=request_delay,
+                raw_responses=raw_responses,
+            )
             data = payload.get("data") or {}
             page_rows = data.get("data") or []
             for raw in page_rows:
@@ -160,7 +199,15 @@ def collect_rankings(*, day: date, date_type: str, cookie: str, max_attempts: in
     return rows
 
 
-def collect_keywords(*, day: date, date_type: str, cookie: str, max_attempts: int, request_delay: float) -> list[dict[str, Any]]:
+def collect_keywords(
+    *,
+    day: date,
+    date_type: str,
+    cookie: str,
+    max_attempts: int,
+    request_delay: float,
+    raw_responses: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     start, end = _period(day, date_type)
     referer = f"https://sycm.taobao.com/mc/free/search_rank?dateRange={start}%7C{end}&dateType={date_type}&cateId={CATE_ID}&cateFlag={CATE_FLAG}"
     rows: list[dict[str, Any]] = []
@@ -171,7 +218,15 @@ def collect_keywords(*, day: date, date_type: str, cookie: str, max_attempts: in
         page = 1
         while True:
             params = {**_base_params(start, end, date_type), "order": "desc", "orderBy": "seIpvUvHits", "kwType": api_kw_type, "rankType": "hot", "keyWord": "", "device": "0", "page": str(page)}
-            payload = _request_json("/mc/mq/mkt/keyword/rank/pro.json", params, cookie=cookie, referer=referer, max_attempts=max_attempts, request_delay=request_delay)
+            payload = _request_json(
+                "/mc/mq/mkt/keyword/rank/pro.json",
+                params,
+                cookie=cookie,
+                referer=referer,
+                max_attempts=max_attempts,
+                request_delay=request_delay,
+                raw_responses=raw_responses,
+            )
             data = payload.get("data") or {}
             page_rows = data.get("data") or []
             for raw in page_rows:
@@ -205,6 +260,44 @@ def _schema(conn: sqlite3.Connection) -> None:
     )""")
 
 
+def _write_raw_capture(
+    output_dir: Path,
+    *,
+    day: date,
+    date_type: str,
+    status: str,
+    requests: list[dict[str, Any]],
+    error: str | None = None,
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output = output_dir / f"{day.isoformat()}.json"
+    output.write_text(
+        json.dumps(
+            {
+                "business_day": day.isoformat(),
+                "date_type": date_type,
+                "category": {
+                    "parent_cate_id": PARENT_CATE_ID,
+                    "cate_id": CATE_ID,
+                    "cate_flag": CATE_FLAG,
+                },
+                "status": status,
+                "error": error,
+                "requests": requests,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    return output
+
+
+def _append_log(path: Path, value: dict[str, object]) -> None:
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--day", type=date.fromisoformat, help="Collect one day (legacy shortcut).")
@@ -215,6 +308,10 @@ def main() -> int:
     parser.add_argument("--cookie-env", default="SYCM_COOKIE")
     parser.add_argument("--browser-port", type=int, default=9222)
     parser.add_argument("--database", type=Path, default=Path(settings.local_database_path))
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--store-id", type=int, default=1)
+    parser.add_argument("--store-name", default=DEFAULT_STORE_NAME)
+    parser.add_argument("--platform-store-id", default=DEFAULT_PLATFORM_STORE_ID)
     parser.add_argument("--skip-existing", action="store_true", help="Skip dates already having both market and keyword rows.")
     parser.add_argument("--max-attempts", type=int, default=8, help="Maximum attempts for each SYCM request.")
     parser.add_argument("--request-delay", type=float, default=1.2, help="Delay after each successful request to reduce rate limiting.")
@@ -229,56 +326,130 @@ def main() -> int:
         end_day = args.end or date.today()
     if end_day < start_day:
         parser.error("--end must be greater than or equal to --start")
-    session = resolve_runtime_session(source=args.session_source, cookie_env=args.cookie_env, browser_port=args.browser_port)
+    args.database = args.database.expanduser().resolve()
+    args.output_dir = args.output_dir.expanduser().resolve()
     args.database.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(args.database) as conn:
+        _schema(conn)
     if args.max_attempts < 1:
         parser.error("--max-attempts must be at least 1")
     if args.request_delay < 0:
         parser.error("--request-delay must be non-negative")
+    runs = CrawlRunStore(args.database)
+    runs.ensure_store_reference(
+        store_id=args.store_id,
+        store_name=args.store_name,
+        platform_store_id=args.platform_store_id,
+    )
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    log_file = args.output_dir / f"collect_sycm_market_{start_day}_{end_day}.jsonl"
+    run_id = runs.create_run(
+        store_id=args.store_id,
+        task_type="sycm_market",
+        start_day=start_day,
+        end_day=end_day,
+        mode="backfill",
+        planned_days=(end_day - start_day).days + 1,
+        log_file=log_file,
+    )
+    summary = {"run_id": run_id, "total": (end_day - start_day).days + 1, "inserted": 0, "no_data": 0, "skipped": 0, "failed": 0}
+    session = None
+    try:
+        session = resolve_runtime_session(
+            source=args.session_source,
+            cookie_env=args.cookie_env,
+            browser_port=args.browser_port,
+        )
+    except Exception as exc:
+        for business_day in (start_day + timedelta(days=index) for index in range(summary["total"])):
+            runs.record_day(
+                run_id=run_id,
+                store_id=args.store_id,
+                business_day=business_day,
+                status="fetch_failed",
+                error_message=str(exc),
+            )
+            _append_log(log_file, {"day": business_day.isoformat(), "status": "failed", "error": str(exc)})
+        summary["failed"] = summary["total"]
+        runs.finish_run(
+            run_id=run_id,
+            status="completed_with_errors",
+            success_days=0,
+            skipped_days=0,
+            failed_days=summary["failed"],
+        )
+        raise
+
     total_market = total_keywords = 0
     failed_days: list[dict[str, str]] = []
     current = start_day
-    while current <= end_day:
-        if args.skip_existing:
-            with sqlite3.connect(args.database) as conn:
-                market_exists = conn.execute(
-                    f"select 1 from {MARKET_TABLE} where stat_start=? and stat_end=? and date_type=? and cate_id=? limit 1",
-                    (*_period(current, args.date_type), args.date_type, CATE_ID),
-                ).fetchone()
-                keyword_exists = conn.execute(
-                    f"select 1 from {KEYWORD_TABLE} where stat_start=? and stat_end=? and date_type=? and cate_id=? limit 1",
-                    (*_period(current, args.date_type), args.date_type, CATE_ID),
-                ).fetchone()
-            if market_exists and keyword_exists:
-                print(json.dumps({"day": current.isoformat(), "status": "skipped_existing"}, ensure_ascii=False), flush=True)
+    try:
+        while current <= end_day:
+            if args.skip_existing:
+                with sqlite3.connect(args.database) as conn:
+                    market_exists = conn.execute(
+                        f"select 1 from {MARKET_TABLE} where stat_start=? and stat_end=? and date_type=? and cate_id=? limit 1",
+                        (*_period(current, args.date_type), args.date_type, CATE_ID),
+                    ).fetchone()
+                    keyword_exists = conn.execute(
+                        f"select 1 from {KEYWORD_TABLE} where stat_start=? and stat_end=? and date_type=? and cate_id=? limit 1",
+                        (*_period(current, args.date_type), args.date_type, CATE_ID),
+                    ).fetchone()
+                if market_exists and keyword_exists:
+                    summary["skipped"] += 1
+                    runs.record_day(run_id=run_id, store_id=args.store_id, business_day=current, status="skipped_existing")
+                    _append_log(log_file, {"day": current.isoformat(), "status": "skipped_existing"})
+                    print(json.dumps({"day": current.isoformat(), "status": "skipped_existing"}, ensure_ascii=False), flush=True)
+                    current += timedelta(days=1)
+                    continue
+            raw_responses: list[dict[str, Any]] = []
+            try:
+                rankings = collect_rankings(day=current, date_type=args.date_type, cookie=session.cookie_header, max_attempts=args.max_attempts, request_delay=args.request_delay, raw_responses=raw_responses)
+                keywords = collect_keywords(day=current, date_type=args.date_type, cookie=session.cookie_header, max_attempts=args.max_attempts, request_delay=args.request_delay, raw_responses=raw_responses)
+            except Exception as exc:
+                raw_output = _write_raw_capture(args.output_dir, day=current, date_type=args.date_type, status="failed", requests=raw_responses, error=str(exc))
+                failure = {"day": current.isoformat(), "status": "retry_pending", "error": str(exc)}
+                failed_days.append(failure)
+                summary["failed"] += 1
+                runs.record_day(run_id=run_id, store_id=args.store_id, business_day=current, status="fetch_failed", error_message=str(exc))
+                _append_log(log_file, {**failure, "output": str(raw_output)})
+                print(json.dumps(failure, ensure_ascii=False), flush=True)
+                if not args.continue_on_error:
+                    raise
                 current += timedelta(days=1)
                 continue
-        try:
-            rankings = collect_rankings(day=current, date_type=args.date_type, cookie=session.cookie_header, max_attempts=args.max_attempts, request_delay=args.request_delay)
-            keywords = collect_keywords(day=current, date_type=args.date_type, cookie=session.cookie_header, max_attempts=args.max_attempts, request_delay=args.request_delay)
-        except Exception as exc:
-            failure = {"day": current.isoformat(), "status": "retry_pending", "error": str(exc)}
-            failed_days.append(failure)
-            print(json.dumps(failure, ensure_ascii=False), flush=True)
-            if not args.continue_on_error:
-                raise
+            now = datetime.now().isoformat(timespec="seconds")
+            with sqlite3.connect(args.database) as conn:
+                conn.execute(f"delete from {MARKET_TABLE} where stat_start=? and stat_end=? and date_type=? and cate_id=?", (*_period(current, args.date_type), args.date_type, CATE_ID))
+                conn.execute(f"delete from {KEYWORD_TABLE} where stat_start=? and stat_end=? and date_type=? and cate_id=?", (*_period(current, args.date_type), args.date_type, CATE_ID))
+                market_cols = "stat_start,stat_end,date_type,parent_cate_id,cate_id,cate_flag,rank_type,rank_metric,rank_no,rank_change,entity_type,entity_id,entity_name,shop_id,shop_name,keyword,paid_buyers_range,visitors_range,sale_item_count,content_id,content_title,content_start_time,fan_count_range,grass_paid_amount_range,goods_clicks_range,live_views_range,raw_json"
+                conn.executemany(f"insert into {MARKET_TABLE} ({market_cols},fetched_at) values ({','.join('?' for _ in market_cols.split(','))},?)", [tuple(row.get(c) for c in market_cols.split(',')) + (now,) for row in rankings])
+                kw_cols = "stat_start,stat_end,date_type,parent_cate_id,cate_id,cate_flag,keyword_type,rank_metric,rank_no,keyword,search_popularity_range,click_rate,pay_conversion_rate,raw_json"
+                conn.executemany(f"insert into {KEYWORD_TABLE} ({kw_cols},fetched_at) values ({','.join('?' for _ in kw_cols.split(','))},?)", [tuple(row.get(c) for c in kw_cols.split(',')) + (now,) for row in keywords])
+                conn.commit()
+            raw_output = _write_raw_capture(args.output_dir, day=current, date_type=args.date_type, status="ingested", requests=raw_responses)
+            metric_count = len(rankings) + len(keywords)
+            if metric_count:
+                summary["inserted"] += 1
+                day_status = "ingested"
+            else:
+                summary["no_data"] += 1
+                day_status = "no_data"
+            runs.record_day(run_id=run_id, store_id=args.store_id, business_day=current, status=day_status, metric_count=metric_count)
+            _append_log(log_file, {"day": current.isoformat(), "status": day_status, "market_rows": len(rankings), "keyword_rows": len(keywords), "output": str(raw_output)})
+            total_market += len(rankings)
+            total_keywords += len(keywords)
+            print(json.dumps({"day": current.isoformat(), "market_rows": len(rankings), "keyword_rows": len(keywords)}, ensure_ascii=False), flush=True)
             current += timedelta(days=1)
-            continue
-        now = datetime.now().isoformat(timespec="seconds")
-        with sqlite3.connect(args.database) as conn:
-            _schema(conn)
-            conn.execute(f"delete from {MARKET_TABLE} where stat_start=? and stat_end=? and date_type=? and cate_id=?", (*_period(current, args.date_type), args.date_type, CATE_ID))
-            conn.execute(f"delete from {KEYWORD_TABLE} where stat_start=? and stat_end=? and date_type=? and cate_id=?", (*_period(current, args.date_type), args.date_type, CATE_ID))
-            market_cols = "stat_start,stat_end,date_type,parent_cate_id,cate_id,cate_flag,rank_type,rank_metric,rank_no,rank_change,entity_type,entity_id,entity_name,shop_id,shop_name,keyword,paid_buyers_range,visitors_range,sale_item_count,content_id,content_title,content_start_time,fan_count_range,grass_paid_amount_range,goods_clicks_range,live_views_range,raw_json"
-            conn.executemany(f"insert into {MARKET_TABLE} ({market_cols},fetched_at) values ({','.join('?' for _ in market_cols.split(','))},?)", [tuple(row.get(c) for c in market_cols.split(',')) + (now,) for row in rankings])
-            kw_cols = "stat_start,stat_end,date_type,parent_cate_id,cate_id,cate_flag,keyword_type,rank_metric,rank_no,keyword,search_popularity_range,click_rate,pay_conversion_rate,raw_json"
-            conn.executemany(f"insert into {KEYWORD_TABLE} ({kw_cols},fetched_at) values ({','.join('?' for _ in kw_cols.split(','))},?)", [tuple(row.get(c) for c in kw_cols.split(',')) + (now,) for row in keywords])
-            conn.commit()
-        total_market += len(rankings)
-        total_keywords += len(keywords)
-        print(json.dumps({"day": current.isoformat(), "market_rows": len(rankings), "keyword_rows": len(keywords)}, ensure_ascii=False), flush=True)
-        current += timedelta(days=1)
-    print(json.dumps({"database": str(args.database), "market_rows": total_market, "keyword_rows": total_keywords, "start": start_day.isoformat(), "end": end_day.isoformat(), "category": CATE_ID, "failed_days": failed_days, "status": "partial" if failed_days else "complete"}, ensure_ascii=False, indent=2))
+    finally:
+        runs.finish_run(
+            run_id=run_id,
+            status="completed_with_errors" if summary["failed"] else "completed",
+            success_days=summary["inserted"],
+            skipped_days=summary["skipped"],
+            failed_days=summary["failed"],
+        )
+    print(json.dumps({"database": str(args.database), "market_rows": total_market, "keyword_rows": total_keywords, "start": start_day.isoformat(), "end": end_day.isoformat(), "category": CATE_ID, "failed_days": failed_days, "status": "partial" if failed_days else "complete", **summary}, ensure_ascii=False, indent=2))
     return 2 if failed_days else 0
 
 
