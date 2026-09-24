@@ -9,8 +9,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "backend"))
 
-from app.integrations.tmall_session import add_session_source_arguments, resolve_runtime_session
-from scripts.fetch_taobao_operational_snapshots import fetch_activity_items
+from app.integrations.tmall_session import add_session_source_arguments
+from app.integrations.session.helpers import request_cookie_headers_for_urls
+from scripts.fetch_taobao_operational_snapshots import ACTIVITY_URL, fetch_activity_items
 
 
 def main() -> int:
@@ -24,8 +25,11 @@ def main() -> int:
     args = parser.parse_args()
     if args.page < 1 or not 1 <= args.page_size <= 200:
         raise ValueError("page must be positive and page-size must be 1..200")
-    session = resolve_runtime_session(source=args.session_source, cookie_env=args.cookie_env, browser_port=args.browser_port)
-    result = fetch_activity_items(output=args.output, cookie=session.cookie_header, snapshot_type=args.snapshot_type, page=args.page, page_size=args.page_size, timeout=args.timeout)
+    cookies = request_cookie_headers_for_urls(
+        source=args.session_source, cookie_env=args.cookie_env, browser_port=args.browser_port,
+        urls=(ACTIVITY_URL,), expected_hosts=("myseller.taobao.com",),
+    )
+    result = fetch_activity_items(output=args.output, cookie=cookies[ACTIVITY_URL], snapshot_type=args.snapshot_type, page=args.page, page_size=args.page_size, timeout=args.timeout)
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
     return 0 if result.ok else 1
 

@@ -63,7 +63,7 @@ const positioningBreakdown = computed(() => {
       share: total ? amount / total * 100 : 0,
       seriesCount: new Set(items.map((item) => item.series || "未分类系列")).size,
     }
-  })
+  }).filter((item) => item.items.length > 0)
 })
 const selectedPositioningNode = computed(() => positioningBreakdown.value.find((item) => item.name === selectedPositioning.value))
 const seriesBreakdown = computed(() => {
@@ -83,6 +83,8 @@ const seriesBreakdown = computed(() => {
 const selectedSeriesNode = computed(() => seriesBreakdown.value.find((item) => item.series === selectedSeries.value))
 const selectedHierarchyItems = computed(() => selectedSeriesNode.value?.items ?? selectedPositioningNode.value?.items ?? [])
 const selectedHierarchyAmount = computed(() => selectedHierarchyItems.value.reduce((sum, item) => sum + item.paid_amount, 0))
+const selectedHierarchyCpsAmount = computed(() => selectedHierarchyItems.value.reduce((sum, item) => sum + item.cps_paid_amount, 0))
+const selectedHierarchyCpsExpense = computed(() => selectedHierarchyItems.value.reduce((sum, item) => sum + item.cps_estimated_expense, 0))
 const selectedHierarchyShare = computed(() => {
   const denominator = selectedSeries.value ? selectedPositioningNode.value?.amount ?? 0 : topProductsTotal.value
   return denominator ? selectedHierarchyAmount.value / denominator * 100 : 0
@@ -104,6 +106,23 @@ const allProductConversion = computed(() => allProductVisitors.value ? (allProdu
 const topThreeAmount = computed(() => products.value.slice(0, 3).reduce((total, item) => total + item.paid_amount, 0))
 const topOneShare = computed(() => topProductsTotal.value ? (products.value[0].paid_amount / topProductsTotal.value) * 100 : 0)
 const topThreeShare = computed(() => topProductsTotal.value ? (topThreeAmount.value / topProductsTotal.value) * 100 : 0)
+const cpsSeriesRows = computed(() => {
+  const grouped = new Map<string, { paid: number; expense: number }>()
+  for (const item of dashboard.value?.analysis?.cps?.product_metrics ?? []) {
+    const key = item.series || "未分类系列"
+    const current = grouped.get(key) || { paid: 0, expense: 0 }
+    current.paid += item.paid_amount
+    current.expense += item.estimated_expense
+    grouped.set(key, current)
+  }
+  return [...grouped.entries()].map(([series, value]) => ({ series, ...value })).filter((item) => item.paid > 0).sort((left, right) => right.paid - left.paid).slice(0, 10)
+})
+const cpsProductCount = computed(() => dashboard.value?.analysis?.cps?.product_metrics?.length ?? 0)
+const cpsSeriesOption = computed(() => ({
+  color: ["#16845b", "#d49a38"], tooltip: { trigger: "axis", axisPointer: { type: "shadow" }, valueFormatter: (value: number) => currency(Number(value)) }, legend: { bottom: 0, data: ["CPS付款", "预估费用"] },
+  grid: { left: 105, right: 26, top: 18, bottom: 48 }, xAxis: { type: "value", axisLabel: { formatter: "¥{value}" }, splitLine: { lineStyle: { color: "#edf1ef" } } }, yAxis: { type: "category", inverse: true, data: cpsSeriesRows.value.map((item) => item.series) },
+  series: [{ name: "CPS付款", type: "bar", barMaxWidth: 18, data: cpsSeriesRows.value.map((item) => item.paid) }, { name: "预估费用", type: "bar", barMaxWidth: 18, data: cpsSeriesRows.value.map((item) => item.expense) }],
+}))
 
 const productRows = computed(() => products.value.map((item, index) => ({
   ...item,
@@ -214,7 +233,7 @@ const productActionRows = computed<BusinessActionRow[]>(() => {
   if (highTrafficLowConversion) rows.push({ id: `low-cvr-${highTrafficLowConversion.product_id}`, priority: "P0", object: highTrafficLowConversion.product_name, issue: "高流量低转化", evidence: `${number(highTrafficLowConversion.visitors)} 访客，转化 ${ratio(highTrafficLowConversion.conversionRate)}，商品整体 ${ratio(averageConversion)}`, impact: currency(highTrafficLowConversion.paid_amount), action: "检查详情首屏卖点、价格权益、评价和可售状态，暂缓继续加大引流。", validation: "支付转化率、加购率、支付金额", window: "3-7 天", tone: "risk", to: { name: "product-analysis", query: { product_id: highTrafficLowConversion.product_id } } })
   const topConcentration = topThreeShare.value
   if (topConcentration >= 70 && products.value.length >= 3) rows.push({ id: "concentration", priority: "P1", object: "Top 3 商品", issue: "成交集中度过高", evidence: `Top 3 占全量商品支付 ${topConcentration.toFixed(1)}%`, impact: currency(topThreeAmount.value), action: "为第二梯队商品补充曝光和关联销售，降低单品依赖；先按系列拆解验证。", validation: "Top 3 占比、第二梯队支付金额", window: "7-14 天", tone: "warning" })
-  const miniProducts = products.value.filter((item) => /mini|尝鲜|试用/i.test(`${item.product_name} ${item.positioning} ${item.product_type}`))
+  const miniProducts = products.value.filter((item) => normalizePositioning(item.positioning) === "MINI装")
   if (miniProducts.length) {
     const miniAmount = miniProducts.reduce((sum, item) => sum + item.paid_amount, 0)
     rows.push({ id: "mini", priority: "P1", object: "MINI/尝鲜商品", issue: "需要验证试用到正装承接", evidence: `${miniProducts.length} 个商品，支付金额 ${currency(miniAmount)}`, impact: currency(miniAmount), action: "进入单品分析核对商品 ID、正装绑定、推广、问大家和库存覆盖。", validation: "正装绑定率、正装首购/复购", window: "7-30 天", tone: "opportunity", to: { name: "product-analysis", query: { product_id: miniProducts[0].product_id } } })
@@ -237,7 +256,7 @@ function productLabel(value: string, max = 22): string {
         <span>商品、系列与装型</span>
       </div>
       <div class="product-page-meta">
-        <span><PackageCheck :size="15" /> {{ fullLoading ? "正在读取全量商品" : `全量覆盖 ${productCount} 个商品` }}</span>
+        <span v-if="fullLoading"><PackageCheck :size="15" /> 正在读取商品</span>
         <small v-if="fullError">全量接口异常，当前回退仪表盘商品：{{ fullError }}</small>
         <small v-if="rangeMismatch">商品数据实际覆盖 {{ compactRange(dashboard.product_range_start, dashboard.product_range_end) }}</small>
       </div>
@@ -251,10 +270,10 @@ function productLabel(value: string, max = 22): string {
     </section>
 
     <section class="panel product-hierarchy-panel">
-      <div class="panel-heading"><div><p>货品结构</p><h2>装型 → 系列 → 商品</h2></div><span class="panel-action">占比分母随选择联动</span></div>
+      <div class="panel-heading"><div><h2>货品结构：装型 → 系列 → 商品</h2></div><span class="panel-action">仅显示当前有数据的装型</span></div>
       <div v-if="positioningBreakdown.some((item) => item.items.length)" class="product-structure-content">
         <div class="product-positioning-tabs" aria-label="商品装型选择">
-          <button v-for="item in positioningBreakdown" :key="item.name" type="button" :class="{ active: selectedPositioning === item.name }" :disabled="!item.items.length" @click="selectPositioning(item.name)">
+          <button v-for="item in positioningBreakdown" :key="item.name" type="button" :class="{ active: selectedPositioning === item.name }" @click="selectPositioning(item.name)">
             <span><strong>{{ item.name }}</strong><em>{{ item.share.toFixed(1) }}%</em></span>
             <small>{{ currency(item.amount) }} · {{ number(item.items.length) }} 商品</small>
             <i><b :style="{ width: `${Math.min(item.share, 100)}%` }"></b></i>
@@ -274,13 +293,15 @@ function productLabel(value: string, max = 22): string {
           </div>
           <div class="product-hierarchy-detail">
             <header><div><p>商品贡献</p><h3>{{ selectedPositioning }}{{ selectedSeries ? ` / ${selectedSeries}` : " / 全部系列" }}</h3></div><button v-if="selectedSeries" type="button" @click="selectedSeries = ''">返回装型</button></header>
-            <div class="product-hierarchy-summary"><div><span>商品数</span><strong>{{ number(selectedHierarchyItems.length) }}</strong></div><div><span>支付金额</span><strong>{{ currency(selectedHierarchyAmount) }}</strong></div><div><span>{{ selectedSeries ? "装型内占比" : "全店占比" }}</span><strong>{{ selectedHierarchyShare.toFixed(1) }}%</strong></div><div><span>系列数</span><strong>{{ selectedSeries ? 1 : number(seriesBreakdown.length) }}</strong></div></div>
+            <div class="product-hierarchy-summary"><div><span>商品数</span><strong>{{ number(selectedHierarchyItems.length) }}</strong></div><div><span>全店支付</span><strong>{{ currency(selectedHierarchyAmount) }}</strong></div><div><span>CPS 付款</span><strong>{{ currency(selectedHierarchyCpsAmount) }}</strong></div><div><span>CPS 预估费用率</span><strong>{{ selectedHierarchyCpsAmount ? ratio(selectedHierarchyCpsExpense / selectedHierarchyCpsAmount * 100) : '--' }}</strong></div></div>
             <div class="product-hierarchy-products"><article v-for="item in selectedHierarchyProductRows.slice(0, 30)" :key="item.product_id"><div><strong :title="item.product_name">{{ item.product_name }}</strong><small>{{ item.series || "未分类系列" }} · {{ item.positioning || "未分类定位" }} · ID {{ item.product_id }}</small><i><b :style="{ width: `${Math.min(item.scopeShare, 100)}%` }"></b></i></div><span><strong>{{ currency(item.paid_amount) }}</strong><small>{{ item.scopeShare.toFixed(1) }}%</small></span></article></div>
           </div>
         </div>
       </div>
       <EmptyState v-else title="暂无商品层级" detail="商品档案与商品日报关联后显示装型、系列和商品层级。" />
     </section>
+
+    <section v-if="cpsSeriesRows.length" class="panel product-cps-series-panel"><div class="panel-heading"><div><p>CPS 商品联动</p><h2>系列付款贡献与预估费用</h2></div><span class="panel-action">{{ number(cpsProductCount) }} 个 CPS 商品</span></div><BusinessChart :option="cpsSeriesOption" ariaLabel="CPS系列付款金额与预估费用" :height="360" /><p class="panel-footnote">按全量 CPS 商品明细和商品档案系列汇总；CPS 付款是渠道归因口径，和商品日报支付可能重叠，不与全店支付相加。</p></section>
 
     <section class="product-analysis-grid">
       <article class="panel product-contribution-panel">
@@ -339,49 +360,50 @@ function productLabel(value: string, max = 22): string {
 .product-positioning-tabs button:hover:not(:disabled), .product-positioning-tabs button.active { border-color: #4f9a79; background: #f5faf7; box-shadow: 0 0 0 2px rgba(45, 145, 105, .08); }
 .product-positioning-tabs button:disabled { cursor: default; opacity: .48; }
 .product-positioning-tabs button > span, .product-series-share-list button > span { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; }
-.product-positioning-tabs strong { color: #34473c; font-size: 13px; }.product-positioning-tabs em { color: #258463; font-size: 15px; font-style: normal; font-weight: 750; }.product-positioning-tabs small { overflow: hidden; color: #8a978f; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.product-positioning-tabs strong { color: #34473c; font-size: 13px; }.product-positioning-tabs em { color: #258463; font-size: 15px; font-style: normal; font-weight: 750; }.product-positioning-tabs small { overflow: hidden; color: #8a978f; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .product-positioning-tabs i, .product-series-share-list i, .product-hierarchy-products article > div > i { display: block; height: 5px; overflow: hidden; border-radius: 4px; background: #e7efeb; }
 .product-positioning-tabs i b, .product-series-share-list i b, .product-hierarchy-products article > div > i b { display: block; height: 100%; border-radius: inherit; background: #35a979; }
-.product-structure-caption { display: flex; align-items: center; justify-content: space-between; gap: 14px; border-left: 3px solid #35a979; padding: 4px 0 4px 11px; }.product-structure-caption strong { color: #34473c; font-size: 11px; }.product-structure-caption span { color: #849188; font-size: 10px; }
+.product-structure-caption { display: flex; align-items: center; justify-content: space-between; gap: 14px; border-top: 1px solid #cfe3d8; padding: 10px 0 2px; }.product-structure-caption strong { color: #34473c; font-size: 12px; }.product-structure-caption span { color: #849188; font-size: 12px; }
 .product-hierarchy-layout { display: grid; grid-template-columns: minmax(390px, .95fr) minmax(420px, 1.05fr); gap: 16px; margin-top: 14px; }
 .product-series-share-list { display: grid; align-content: start; gap: 7px; max-height: 520px; overflow: auto; padding-right: 3px; }
-.product-series-share-list button { display: grid; gap: 7px; border: 1px solid #e2e8e4; border-radius: 5px; padding: 10px 11px; color: #475467; background: #fff; text-align: left; cursor: pointer; }.product-series-share-list button:hover, .product-series-share-list button.active { border-color: #5d9c80; background: #f7faf8; }.product-series-share-list strong { overflow: hidden; color: #34473c; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.product-series-share-list em { color: #258463; font-size: 11px; font-style: normal; font-weight: 750; }.product-series-share-list small { color: #8d9992; font-size: 9px; }
-.product-hierarchy-detail { min-width: 0; border: 1px solid #e1e8f0; border-radius: 5px; padding: 14px; background: #fbfcfe; }.product-hierarchy-detail > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }.product-hierarchy-detail p { margin: 0 0 4px; color: #21845f; font-size: 10px; font-weight: 700; }.product-hierarchy-detail h3 { margin: 0; overflow: hidden; color: #344054; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }.product-hierarchy-detail header button { border: 1px solid #cbd8e8; border-radius: 4px; padding: 5px 8px; color: #356ae6; background: #fff; font-size: 10px; cursor: pointer; }
-.product-hierarchy-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin: 13px 0; background: #e1e8f0; }.product-hierarchy-summary > div { display: grid; gap: 5px; padding: 10px; background: #fff; }.product-hierarchy-summary span { color: #98a2b3; font-size: 9px; }.product-hierarchy-summary strong { color: #344054; font-size: 12px; }
-.product-hierarchy-products { display: grid; max-height: 440px; overflow-y: auto; }.product-hierarchy-products article { display: grid; grid-template-columns: minmax(0, 1fr) auto; min-height: 62px; align-items: center; gap: 14px; border-bottom: 1px solid #edf0f4; }.product-hierarchy-products article > div { min-width: 0; }.product-hierarchy-products article > div > i { margin-top: 7px; }.product-hierarchy-products strong, .product-hierarchy-products small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.product-hierarchy-products strong { color: #475467; font-size: 10px; }.product-hierarchy-products small { margin-top: 4px; color: #98a2b3; font-size: 9px; }.product-hierarchy-products article > span { display: grid; flex: 0 0 auto; gap: 3px; text-align: right; }.product-hierarchy-products article > span strong { color: #258463; }.product-hierarchy-products article > span small { margin: 0; }
+.product-series-share-list button { display: grid; gap: 7px; border: 1px solid #e2e8e4; border-radius: 5px; padding: 10px 11px; color: #475467; background: #fff; text-align: left; cursor: pointer; }.product-series-share-list button:hover, .product-series-share-list button.active { border-color: #5d9c80; background: #f7faf8; }.product-series-share-list strong { overflow: hidden; color: #34473c; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }.product-series-share-list em { color: #258463; font-size: 12px; font-style: normal; font-weight: 750; }.product-series-share-list small { color: #8d9992; font-size: 12px; }
+.product-hierarchy-detail { min-width: 0; border: 1px solid #e1e8f0; border-radius: 5px; padding: 14px; background: #fbfcfe; }.product-hierarchy-detail > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }.product-hierarchy-detail p { margin: 0 0 4px; color: #21845f; font-size: 12px; font-weight: 700; }.product-hierarchy-detail h3 { margin: 0; overflow: hidden; color: #344054; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }.product-hierarchy-detail header button { border: 1px solid #cbd8e8; border-radius: 4px; padding: 5px 8px; color: #356ae6; background: #fff; font-size: 12px; cursor: pointer; }
+.product-hierarchy-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin: 13px 0; background: #e1e8f0; }.product-hierarchy-summary > div { display: grid; gap: 5px; padding: 10px; background: #fff; }.product-hierarchy-summary span { color: #98a2b3; font-size: 12px; }.product-hierarchy-summary strong { color: #344054; font-size: 12px; }
+.product-hierarchy-products { display: grid; max-height: 440px; overflow-y: auto; }.product-hierarchy-products article { display: grid; grid-template-columns: minmax(0, 1fr) auto; min-height: 62px; align-items: center; gap: 14px; border-bottom: 1px solid #edf0f4; }.product-hierarchy-products article > div { min-width: 0; }.product-hierarchy-products article > div > i { margin-top: 7px; }.product-hierarchy-products strong, .product-hierarchy-products small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.product-hierarchy-products strong { color: #475467; font-size: 12px; }.product-hierarchy-products small { margin-top: 4px; color: #98a2b3; font-size: 12px; }.product-hierarchy-products article > span { display: grid; flex: 0 0 auto; gap: 3px; text-align: right; }.product-hierarchy-products article > span strong { color: #258463; }.product-hierarchy-products article > span small { margin: 0; }
 .product-detail-heading { align-items: end; }
 .product-detail-table-wrap { margin-top: 12px; overflow-x: auto; border-top: 1px solid #dfe6ed; }
 .product-detail-table { display: grid; grid-template-columns: minmax(360px, 2fr) minmax(92px, .55fr) minmax(84px, .48fr) minmax(90px, .5fr) minmax(132px, .72fr) minmax(130px, .7fr); min-width: 980px; align-items: center; column-gap: 14px; font-variant-numeric: tabular-nums; }
 .product-detail-table > :not(:first-child) { text-align: right; }
-.product-detail-table-head { position: sticky; top: 0; z-index: 2; min-height: 38px; border-bottom: 1px solid #dfe6ed; color: #8491a1; background: #fff; font-size: 10px; }
+.product-detail-table-head { position: sticky; top: 0; z-index: 2; min-height: 38px; border-bottom: 1px solid #dfe6ed; color: #8491a1; background: #fff; font-size: 12px; }
 .product-sort-head { display: inline-flex; min-height: 30px; align-items: center; justify-content: flex-end; gap: 4px; border: 0; padding: 0; color: inherit; background: transparent; font: inherit; cursor: pointer; }
 .product-sort-head:hover { color: #2b63d9; }
-.product-detail-table-total { min-height: 43px; border-bottom: 1px solid #d8e2ec; color: #47647b; background: #f4f8fb; font-size: 11px; }
+.product-detail-table-total { min-height: 43px; border-bottom: 1px solid #d8e2ec; color: #47647b; background: #f4f8fb; font-size: 12px; }
 .product-detail-table-total > :first-child { padding-left: 8px; color: #27485d; }
 .product-detail-table-total strong { font-size: 12px; }
 .product-detail-table.product-detail-item { min-height: 58px; border-bottom: 1px solid #edf1f4; padding: 5px 0; }
 .product-detail-table.product-detail-item:hover { background: #f9fbfc; }
-.product-detail-table.product-detail-item > strong { color: #526879; font-size: 11px; font-weight: 650; }
+.product-detail-table.product-detail-item > strong { color: #526879; font-size: 12px; font-weight: 650; }
 .product-detail-table.product-detail-item > .product-money { color: #207a5d; }
 .product-detail-copy { display: grid; grid-template-columns: 38px minmax(0, 1fr); align-items: center; min-width: 0; padding-left: 5px; text-align: left; }
 .product-detail-copy > div:last-child { min-width: 0; }
 .product-detail-copy strong, .product-detail-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.product-detail-copy strong { color: #344d43; font-size: 11px; font-weight: 680; }
-.product-detail-copy span { margin-top: 4px; color: #96a39f; font-size: 9px; }
+.product-detail-copy strong { color: #344d43; font-size: 12px; font-weight: 680; }
+.product-detail-copy span { margin-top: 4px; color: #96a39f; font-size: 12px; }
 .product-rank { color: #32aa7d; font-size: 12px; font-weight: 750; }
 .product-share { display: grid; grid-template-columns: minmax(55px, 1fr) 38px; align-items: center; gap: 8px; }
 .product-share > div { height: 5px; overflow: hidden; border-radius: 4px; background: #e7efeb; }
 .product-share i { display: block; height: 100%; border-radius: inherit; background: #3db286; }
-.product-share strong { color: #668074; font-size: 10px; }
-.product-detail-pagination { display: flex; min-height: 52px; align-items: center; justify-content: flex-end; gap: 14px; border-top: 1px solid #edf1f4; color: #7c8998; font-size: 10px; }
+.product-share strong { color: #668074; font-size: 12px; }
+.product-detail-pagination { display: flex; min-height: 52px; align-items: center; justify-content: flex-end; gap: 14px; border-top: 1px solid #edf1f4; color: #7c8998; font-size: 12px; }
 .product-detail-pagination > span { margin-right: auto; }
 .product-detail-pagination label { display: inline-flex; align-items: center; gap: 6px; }
 .product-detail-pagination select { height: 29px; border: 1px solid #d8e1e9; border-radius: 4px; padding: 0 6px; color: #536579; background: #fff; }
 .product-page-buttons { display: inline-flex; gap: 4px; }
-.product-page-buttons button { min-width: 30px; height: 29px; border: 1px solid #d8e1e9; border-radius: 4px; padding: 0 8px; color: #536579; background: #fff; font-size: 10px; }
+.product-page-buttons button { min-width: 30px; height: 29px; border: 1px solid #d8e1e9; border-radius: 4px; padding: 0 8px; color: #536579; background: #fff; font-size: 12px; }
 .product-page-buttons button.active { border-color: #356ae6; color: #fff; background: #356ae6; }
 .product-page-buttons button:disabled { opacity: .42; }
 @media (max-width: 1050px) { .product-positioning-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }.product-hierarchy-layout { grid-template-columns: 1fr; } }
 @media (max-width: 720px) { .product-detail-heading { align-items: flex-start; flex-direction: column; gap: 8px; }.product-detail-pagination { align-items: flex-start; flex-wrap: wrap; padding: 12px 0; }.product-detail-pagination > span { width: 100%; margin-right: 0; }.product-page-buttons { overflow-x: auto; max-width: 100%; } }
 @media (max-width: 620px) { .product-positioning-tabs { grid-template-columns: 1fr; }.product-structure-caption { align-items: flex-start; flex-direction: column; }.product-hierarchy-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 760px) { .product-hierarchy-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 </style>

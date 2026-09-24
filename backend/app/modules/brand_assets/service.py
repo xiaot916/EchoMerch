@@ -36,7 +36,6 @@ from app.core.local_database import (
     BRAND_PRODUCT_STATUS,
     BRAND_PRODUCT_TABLE,
     BRAND_STATUS,
-    BRAND_STORE_SCOPE_TABLE,
     BRAND_SUBJECT_ID,
     BRAND_TRANSACTION_AMOUNT,
     BRAND_TRANSACTION_BUYER_COUNT,
@@ -86,24 +85,11 @@ class BrandAssetService:
                 placeholders = ",".join("?" for _ in principal.brand_ids)
                 where = f"where b.{q(BRAND_ID)} in ({placeholders})"
                 params.extend(sorted(principal.brand_ids))
-            scope_exists = LocalDatabase._table_exists(conn, BRAND_STORE_SCOPE_TABLE)
-            scope_select = (
-                f"group_concat(scope.{q(STORE_ID)}) as store_ids"
-                if scope_exists
-                else "null as store_ids"
-            )
-            scope_join = (
-                f"left join {q(BRAND_STORE_SCOPE_TABLE)} scope "
-                f"on scope.{q(BRAND_ID)} = b.{q(BRAND_ID)}"
-                if scope_exists
-                else ""
-            )
             rows = conn.execute(
                 f"""
                 select b.{q(BRAND_ID)}, b.{q(BRAND_SUBJECT_ID)}, b.{q(BRAND_NAME)}, b.{q(BRAND_STATUS)},
-                       {scope_select}
+                       null as store_ids
                 from brands b
-                {scope_join}
                 {where}
                 group by b.{q(BRAND_ID)}, b.{q(BRAND_SUBJECT_ID)}, b.{q(BRAND_NAME)}, b.{q(BRAND_STATUS)}
                 order by b.{q(BRAND_NAME)} collate nocase

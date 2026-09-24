@@ -12,13 +12,14 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_ROOT = PROJECT_ROOT / "backend"
@@ -27,6 +28,9 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from app.core.business_days import parse_business_day, yesterday_in_shanghai  # noqa: E402
 from app.core.config import settings  # noqa: E402
+from app.integrations.session.batch import (  # noqa: E402
+    bootstrap_collection_sessions,
+)
 from app.core.local_database import (  # noqa: E402
     BUSINESS_DAY,
     CRAWL_RUN_ID,
@@ -42,6 +46,7 @@ from app.modules.collection.coverage import (  # noqa: E402
     audit_dataset_coverage,
 )
 from app.modules.collection.registry import COLLECTION_DATASET_BY_KEY  # noqa: E402
+from app.modules.collection.dates import CURRENT_DAY_ONLY_DATASETS, validate_collection_day  # noqa: E402
 from app.modules.imports.crawl_run_store import CrawlRunStore  # noqa: E402
 
 
@@ -60,6 +65,7 @@ class DatasetSpec:
 # and makes console output stable for scheduled runs and troubleshooting.
 DATASETS: tuple[DatasetSpec, ...] = (
     DatasetSpec("sycm_overviews", "backfill_sycm_overviews.py", "SYCM 店铺总览", platform_group="sycm"),
+    DatasetSpec("sycm_activity_calendar", "backfill_sycm_activity_calendar.py", "SYCM 活动日历当前快照", platform_group="sycm"),
     DatasetSpec("sycm_bybt", "backfill_sycm_bybt.py", "SYCM 生意参谋 BYBT", platform_group="sycm"),
     DatasetSpec("sycm_bybt_items", "backfill_sycm_bybt_items.py", "SYCM 百亿补贴商品明细", platform_group="sycm"),
     DatasetSpec("sycm_customer_overviews", "backfill_sycm_customer_overviews.py", "SYCM 客户概览", platform_group="sycm"),
@@ -74,21 +80,24 @@ DATASETS: tuple[DatasetSpec, ...] = (
     DatasetSpec("mtop_taojinbi", "backfill_mtop_taojinbi.py", "淘金币 MTop", platform_group="mtop"),
     DatasetSpec("customer_service", "backfill_customer_service.py", "客服总览与账号", platform_group="customer_service"),
     DatasetSpec("cps_overviews", "backfill_cps_overviews.py", "淘宝客 CPS 总览", platform_group="alimama"),
+    DatasetSpec("cps_items", "backfill_cps_items.py", "淘宝客 CPS 商品明细", platform_group="alimama"),
     DatasetSpec("brandsearch_reports", "backfill_brandsearch_reports.py", "品销宝品牌专区", platform_group="brandsearch"),
     DatasetSpec("taobao_flash_sales", "backfill_taobao_flash_sales.py", "淘宝秒杀", platform_group="taobao"),
     DatasetSpec("taobao_flash_sale_items", "backfill_taobao_flash_sale_items.py", "淘宝秒杀商品明细", platform_group="taobao"),
     DatasetSpec("taobao_operational_snapshots", "backfill_taobao_operational_snapshots.py", "淘宝红线价、当前价格与活动在线快照", platform_group="taobao"),
-    DatasetSpec("sycm_activity_calendar", "backfill_sycm_activity_calendar.py", "SYCM 活动日历当前快照", platform_group="sycm"),
     DatasetSpec("utry_overviews", "backfill_utry_overviews.py", "U先派样与复购商品数据", platform_group="utry"),
     DatasetSpec("alimama_campaigns", "backfill_alimama_campaigns.py", "阿里妈妈计划", platform_group="alimama"),
     DatasetSpec("alimama_crowds", "backfill_alimama_crowds.py", "阿里妈妈人群", platform_group="alimama"),
     DatasetSpec("alimama_promotion_details", "backfill_alimama_promotion_details.py", "阿里妈妈推广明细", platform_group="alimama"),
     DatasetSpec("alimama_adgroup_bidwords", "backfill_alimama_adgroup_bidwords.py", "阿里妈妈单元/关键词", platform_group="alimama"),
     DatasetSpec("databank_daily", "backfill_databank_daily.py", "品牌数据银行日报", platform_group="databank"),
+    DatasetSpec("sycm_home_board", "backfill_sycm_home_board.py", "SYCM 首页看板", platform_group="sycm"),
 )
 
 DATASET_BY_NAME = {item.name: item for item in DATASETS}
-DEFAULT_DATASET_NAMES = tuple(item.name for item in DATASETS)
+# The default report run targets yesterday; current-state snapshots are
+# captured separately with an explicit --day today --datasets selection.
+DEFAULT_DATASET_NAMES = tuple(item.name for item in DATASETS if item.name != "taobao_operational_snapshots")
 
 # The worker scripts use stable crawl task types in the coverage ledger.  Keep
 # this mapping in the orchestrator so a child terminated on timeout can have
@@ -108,6 +117,7 @@ CRAWL_TASK_TYPES: dict[str, tuple[str, ...]] = {
     "mtop_taojinbi": ("mtop_taojinbi",),
     "customer_service": ("customer_service",),
     "cps_overviews": ("cps_overview",),
+    "cps_items": ("cps_items",),
     "brandsearch_reports": ("brandsearch_report",),
     "taobao_flash_sales": ("taobao_flash_sale",),
     "taobao_flash_sale_items": ("taobao_flash_sale_items",),
@@ -122,9 +132,11 @@ CRAWL_TASK_TYPES: dict[str, tuple[str, ...]] = {
     "alimama_adgroup_bidwords:bidword": ("alimama_bidwords",),
     "databank_daily": ("databank_daily",),
     "sycm_market": ("sycm_market",),
+    "sycm_home_board": ("sycm_home_board",),
 }
 PROMOTION_DATASET_NAMES = frozenset({
     "cps_overviews",
+    "cps_items",
     "brandsearch_reports",
     "alimama_campaigns",
     "alimama_crowds",
@@ -406,6 +418,10 @@ def _commands_for_spec(
     mutable_refresh_days: int = 4,
     coverage_window_days: int = DEFAULT_COVERAGE_WINDOW_DAYS,
 ) -> list[list[str]]:
+    # A real-time snapshot has no historical query parameter. The report-gap
+    # planner must not turn today's capture into a request for an older day.
+    if spec.name in CURRENT_DAY_ONLY_DATASETS or spec.name == "sycm_activity_calendar":
+        resume_from_latest = False
     audit = (
         _coverage_audit(
             spec=spec,
@@ -492,6 +508,61 @@ def _cleanup_timed_out_crawl_run(
     return None
 
 
+# Lines that only exist because a sub-script pretty-printed a JSON summary.
+# Taking the *last* stdout line then yields a useless "}" / "]" as the failure
+# reason, which is exactly what happened for 品牌专区分日明细.  Prefer the last
+# line that actually carries information.
+_JSON_PUNCTUATION_ONLY = frozenset({"{", "}", "[", "]", ",", ":", "},", "],", "};"})
+_JSON_SUMMARY_LINE = re.compile(
+    r'^"(?:run_id|total|inserted|no_data|skipped|failed|status|output|counts|metric_count|'
+    r'dataset|returncode|error|stdout|stderr|business_day|day)"\s*:'
+)
+_ERROR_KEYWORDS = (
+    "traceback", "error", "failed", "failure", "exception", "runtime",
+    "unavailable", "invalid", "missing", "refused", "timeout", "timed out",
+    "denied", "unauthor", "login", "expired", "错误", "失败", "异常", "失效",
+    "未捕获", "未返回", "超时", "拒绝", "登录",
+)
+
+
+def _concise_failure_detail(result: Mapping[str, object]) -> str:
+    """Pick the most informative line from a failed sub-task's output.
+
+    ``result`` may carry ``error`` (raised locally), ``stderr`` or ``stdout``
+    from the child process.  Child scripts often end with a pretty-printed JSON
+    summary whose lines are ``"failed": 1`` / ``}`` — neither carries a usable
+    diagnostic, so skip punctuation-only and JSON-summary lines and prefer a
+    line that actually looks like an error, falling back to stderr.
+    """
+    stderr_lines: list[str] = []
+    stdout_lines: list[str] = []
+    for key, sink in (("stderr", stderr_lines), ("stdout", stdout_lines)):
+        value = str(result.get(key) or "")
+        sink.extend(line.strip() for line in value.splitlines() if line.strip())
+
+    def _informative(lines: list[str]) -> list[str]:
+        return [
+            line
+            for line in lines
+            if line not in _JSON_PUNCTUATION_ONLY and not _JSON_SUMMARY_LINE.match(line)
+        ]
+
+    # A locally raised error (timeout, OSError, ...) is the most precise cause.
+    local_error = str(result.get("error") or "").strip()
+    if local_error:
+        return local_error[:320]
+
+    # Child stderr is the primary diagnostic channel; stdout is only a fallback.
+    for group in (_informative(stderr_lines), _informative(stdout_lines)):
+        for line in reversed(group):
+            if any(keyword in line.lower() for keyword in _ERROR_KEYWORDS):
+                return line[:320]
+        if group:
+            return group[-1][:320]
+
+    return "子任务未返回错误详情"
+
+
 def run_collection(
     *,
     day: date,
@@ -511,20 +582,33 @@ def run_collection(
 ) -> tuple[int, dict[str, object]]:
     if parallelism < 1:
         raise ValueError("parallelism must be at least 1")
+    validate_collection_day(dataset_names, day)
     specs = selected_specs(dataset_names)
     started_at = datetime.now().astimezone()
     results: list[dict[str, object]] = []
     child_env = os.environ.copy()
     child_env["PYTHONIOENCODING"] = "utf-8"
+    snapshot_keys = {_batch_snapshot_key(spec) for spec in specs}
+    snapshot_keys.discard(None)
+    snapshots = bootstrap_collection_sessions(
+        source=session_source,
+        browser_port=browser_port,
+        platforms={str(value) for value in snapshot_keys},
+    )
+    for snapshot in snapshots.values():
+        child_env.update(snapshot.environment)
     jobs: list[tuple[DatasetSpec, list[str], str]] = []
     platform_locks: dict[str, threading.Lock] = {}
     for spec in specs:
+        snapshot = snapshots.get(_batch_snapshot_key(spec) or "")
+        job_source = snapshot.session_source if snapshot else session_source
+        job_cookie_env = snapshot.cookie_env if snapshot else cookie_env
         for command in _commands_for_spec(
             spec,
             day=day,
             database_path=database_path,
-            session_source=session_source,
-            cookie_env=cookie_env,
+            session_source=job_source,
+            cookie_env=job_cookie_env,
             browser_port=browser_port,
             refresh_existing=refresh_existing,
             promotion_refresh_days=promotion_refresh_days,
@@ -581,9 +665,7 @@ def run_collection(
         if result["status"] == "completed":
             print(f"[{label}] completed", flush=True)
         else:
-            detail = str(result.get("error") or result.get("stderr") or result.get("stdout") or "")
-            detail_lines = [line.strip() for line in detail.splitlines() if line.strip()]
-            concise_detail = detail_lines[-1][:320] if detail_lines else "子任务未返回错误详情"
+            concise_detail = _concise_failure_detail(result)
             print(f"[{label}] failed: {concise_detail}", flush=True)
         return result
 
@@ -594,10 +676,10 @@ def run_collection(
             if fail_fast and result["status"] != "completed":
                 break
     else:
-        # The browser adapter gives every worker its own tab and SQLite runs in
-        # WAL mode.  A small bounded pool keeps independent datasets moving
-        # without opening one tab/process per dataset or overwhelming the
-        # platform and local database with burst traffic.
+        # SQLite runs in WAL mode.  A small bounded pool keeps independent
+        # datasets moving without bursting platform traffic; when the parent
+        # bootstrap succeeded these workers are pure HTTP and do not attach to
+        # the browser at all.
         with ThreadPoolExecutor(max_workers=min(parallelism, len(jobs)), thread_name_prefix="daily-collector") as executor:
             future_positions = {
                 executor.submit(execute, job): index
@@ -619,6 +701,28 @@ def run_collection(
         "results": results,
     }
     return (1 if failed else 0), summary
+
+
+def _batch_snapshot_key(spec: DatasetSpec) -> str | None:
+    """Map a dataset to the one browser context it can reuse."""
+    if spec.name == "taobao_operational_snapshots":
+        # This worker calls both MTop and sale.taobao.com. Each needs Chrome's
+        # own domain-scoped Cookie header, not the SYCM all-domain snapshot.
+        return None
+    if spec.name.startswith("cps_"):
+        return "cps"
+    if spec.name.startswith("alimama_"):
+        return "alimama"
+    if spec.name == "brandsearch_reports":
+        return "brandsearch"
+    if spec.name == "databank_daily":
+        return "databank"
+    # These read-only MTop/Taobao helpers use the same Taobao login cookie jar
+    # and the generic session resolver; reuse the SYCM snapshot instead of
+    # attaching to the browser once per script.
+    if spec.platform_group in {"sycm", "mtop", "customer_service", "taobao"}:
+        return "sycm"
+    return None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -650,7 +754,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=_parse_dataset_names,
         default=list(DEFAULT_DATASET_NAMES),
         metavar="NAME[,NAME...]",
-        help="Comma-separated dataset names, or all (default: all persisted datasets).",
+        help="Comma-separated dataset names, or all reports (default: historical reports; use --day today --datasets taobao_operational_snapshots for the live snapshot).",
     )
     parser.add_argument("--database-path", type=Path, default=Path(settings.local_database_path))
     parser.add_argument("--session-source", choices=("env", "drissionpage"), default=os.getenv("ECHO_TMALL_SESSION_SOURCE", "drissionpage"))
@@ -701,6 +805,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.parallelism < 1 or args.parallelism > 8:
         parser.error("--parallelism must be between 1 and 8")
     args.database_path = args.database_path.expanduser().resolve()
+    validate_collection_day(args.datasets, args.day)
     specs = selected_specs(args.datasets)
     commands = [
         _display_command(command)

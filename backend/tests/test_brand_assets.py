@@ -109,7 +109,13 @@ def test_brand_asset_subject_and_scope_are_separate(tmp_path: Path) -> None:
         _restore_settings(original)
 
 
-def test_brand_store_scope_survives_repeated_schema_initialization(tmp_path: Path) -> None:
+def test_brand_scope_tables_survive_repeated_schema_initialization(tmp_path: Path) -> None:
+    """品牌授权范围与店铺授权范围分属两张表，且重复初始化不会丢失。
+
+    品牌事实本身不携带店铺 ID；品牌维度的授权走 access_user_brand_scopes，
+    店铺维度的授权走 access_user_store_scopes，两者互补而非合并。
+    """
+
     database_path = tmp_path / "brand-schema-reinitialize.sqlite3"
     database = LocalDatabase(database_path)
 
@@ -117,15 +123,26 @@ def test_brand_store_scope_survives_repeated_schema_initialization(tmp_path: Pat
     database.initialize_schema(force=True)
 
     with database.connect() as conn:
-        table = conn.execute(
-            "select name from sqlite_master where type = 'table' and name = 'brand_store_scopes'"
-        ).fetchone()
-        index = conn.execute(
-            "select name from sqlite_master where type = 'index' and name = 'idx_brand_store_scopes_store'"
-        ).fetchone()
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "select name from sqlite_master where type = 'table' and name in ("
+                "'access_user_brand_scopes', 'access_user_store_scopes')"
+            ).fetchall()
+        }
+        indexes = {
+            row[0]
+            for row in conn.execute(
+                "select name from sqlite_master where type = 'index' and name in ("
+                "'idx_access_user_brand_scopes_brand', 'idx_access_user_store_scopes_store')"
+            ).fetchall()
+        }
 
-    assert table is not None
-    assert index is not None
+    assert tables == {"access_user_brand_scopes", "access_user_store_scopes"}
+    assert indexes == {
+        "idx_access_user_brand_scopes_brand",
+        "idx_access_user_store_scopes_store",
+    }
 
 
 def test_product_analysis_uses_product_id_and_series_across_authorized_brands(tmp_path: Path) -> None:

@@ -53,3 +53,29 @@ def test_brandsearch_report_builds_daily_query(monkeypatch, tmp_path: Path) -> N
     assert request.get_header("Cookie") == "t=runtime-session"
     assert captured["timeout"] == 17
     assert json.loads(output.read_text(encoding="utf-8"))["data"]
+
+
+def test_brandsearch_html_retries_in_existing_branding_tab(monkeypatch, tmp_path: Path) -> None:
+    class HtmlResponse(_Response):
+        def read(self) -> bytes:
+            return b"<html>login</html>"
+
+    monkeypatch.setattr(fetch_brandsearch_report, "urlopen", lambda *_args, **_kwargs: HtmlResponse())
+    captured: dict[str, object] = {}
+
+    def browser_fetch(port: int, url: str, *, timeout: int) -> tuple[int, bytes]:
+        captured.update(port=port, url=url, timeout=timeout)
+        return 200, b'{"data":{"rptQueryResp":{"rptDataSum":[]}},"info":{"ok":true}}'
+
+    monkeypatch.setattr(fetch_brandsearch_report, "_fetch_in_brandsearch_tab", browser_fetch)
+    output = tmp_path / "brandsearch.json"
+    status, _code, _message, size = fetch_brandsearch_report.fetch_brandsearch_report(
+        business_day=date(2026, 9, 22), output=output,
+        cookie="t=session", csrf_id="csrf", browser_port=9222, timeout=11,
+    )
+
+    assert (status, size) == (200, output.stat().st_size)
+    assert captured["port"] == 9222
+    assert captured["timeout"] == 11
+    assert urlparse(str(captured["url"])).hostname == "brandsearch.taobao.com"
+    assert json.loads(output.read_text(encoding="utf-8"))["info"]["ok"] is True

@@ -6,6 +6,7 @@ import { init, use } from "echarts/core"
 import { CanvasRenderer } from "echarts/renderers"
 import type { ECharts } from "echarts/core"
 
+import { baseCategoryAxis, baseValueAxis, withChartTheme } from "@/lib/echartsTheme"
 import type { CustomerServiceDailyMetric } from "@/types"
 
 use([LineChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
@@ -26,14 +27,14 @@ function renderChart() {
   const dates = props.metrics.map((item) => item.stat_date.slice(5))
 
   chart.setOption(
-    {
+    withChartTheme({
       animationDuration: 350,
       color: ["#16845b", "#6e9b83", "#4f77c8", "#c28a2f", "#8b63b8"],
       tooltip: {
         trigger: "axis",
         backgroundColor: "#ffffff",
         borderColor: "#dce8e1",
-        textStyle: { color: "#33443b", fontSize: 11 },
+        textStyle: { color: "#33443b", fontSize: 12 },
         axisPointer: { type: "line", lineStyle: { color: "#8ebea8", opacity: 0.4 } },
         formatter: (params: Array<{ seriesName: string; value: number; axisValue: string; seriesIndex: number; marker: string }>) => {
           if (!params.length) return ""
@@ -51,22 +52,22 @@ function renderChart() {
         },
       },
       legend: [
-        { data: ["客服销售额", "客服净销售额", "咨询用户"], top: 2, left: 48, itemWidth: 14, itemHeight: 7, textStyle: { color: "#66776e", fontSize: 10 } },
-        { data: ["平均响应", "满意率"], top: "53%", left: 48, itemWidth: 14, itemHeight: 7, textStyle: { color: "#66776e", fontSize: 10 } },
+        { data: ["客服销售额", "客服净销售额", "咨询用户"], top: 2, left: 48, itemWidth: 14, itemHeight: 7, textStyle: { color: "#66776e", fontSize: 12 } },
+        { data: ["平均响应", "满意率"], top: "53%", left: 48, itemWidth: 14, itemHeight: 7, textStyle: { color: "#66776e", fontSize: 12 } },
       ],
       grid: [
         { left: 54, right: 58, top: 36, height: "34%" },
         { left: 54, right: 58, top: "61%", height: "27%" },
       ],
       xAxis: [
-        { type: "category", gridIndex: 0, boundaryGap: false, data: dates, axisLine: { lineStyle: { color: "#dfe8e3" } }, axisTick: { show: false }, axisLabel: { show: false } },
-        { type: "category", gridIndex: 1, boundaryGap: false, data: dates, axisLine: { lineStyle: { color: "#dfe8e3" } }, axisTick: { show: false }, axisLabel: { color: "#8b9891", fontSize: 9, interval: "auto", hideOverlap: true } },
+        baseCategoryAxis({ gridIndex: 0, boundaryGap: false, data: dates, axisLabel: { show: false } }),
+        baseCategoryAxis({ gridIndex: 1, boundaryGap: false, data: dates, axisLabel: { color: "#8b9891", fontSize: 12, interval: "auto", hideOverlap: true } }),
       ],
       yAxis: [
-        { type: "value", gridIndex: 0, name: "销售额", nameTextStyle: { color: "#86948c", fontSize: 9 }, splitLine: { lineStyle: { color: "#edf2ef", type: "dashed" } }, axisLabel: { color: "#8b9891", fontSize: 9, formatter: (value: number) => compactNumber(value) } },
-        { type: "value", gridIndex: 0, name: "咨询", nameTextStyle: { color: "#86948c", fontSize: 9 }, splitLine: { show: false }, axisLabel: { color: "#8b9891", fontSize: 9, formatter: (value: number) => compactNumber(value) } },
-        { type: "value", gridIndex: 1, name: "响应(秒)", nameTextStyle: { color: "#86948c", fontSize: 9 }, splitLine: { lineStyle: { color: "#edf2ef", type: "dashed" } }, axisLabel: { color: "#8b9891", fontSize: 9 } },
-        { type: "value", gridIndex: 1, min: 0, max: 100, name: "满意率", nameTextStyle: { color: "#86948c", fontSize: 9 }, splitLine: { show: false }, axisLabel: { color: "#8b9891", fontSize: 9, formatter: "{value}%" } },
+        baseValueAxis({ gridIndex: 0, name: "销售额", nameTextStyle: { color: "#86948c", fontSize: 12 }, splitLine: { lineStyle: { color: "#edf2ef", type: "dashed" } }, axisLabel: { color: "#8b9891", fontSize: 12, formatter: (value: number) => compactNumber(value) } }),
+        baseValueAxis({ gridIndex: 0, name: "咨询", nameTextStyle: { color: "#86948c", fontSize: 12 }, splitLine: { show: false }, axisLabel: { color: "#8b9891", fontSize: 12, formatter: (value: number) => compactNumber(value) } }),
+        baseValueAxis({ gridIndex: 1, name: "响应(秒)", nameTextStyle: { color: "#86948c", fontSize: 12 }, splitLine: { lineStyle: { color: "#edf2ef", type: "dashed" } }, axisLabel: { color: "#8b9891", fontSize: 12 } }),
+        baseValueAxis({ gridIndex: 1, min: 0, max: 100, name: "满意率", nameTextStyle: { color: "#86948c", fontSize: 12 }, splitLine: { show: false }, axisLabel: { color: "#8b9891", fontSize: 12, formatter: "{value}%" } }),
       ],
       series: [
         { name: "客服销售额", type: "line", xAxisIndex: 0, yAxisIndex: 0, smooth: true, symbol: "none", lineStyle: { width: 2.4 }, areaStyle: { color: "rgba(22, 132, 91, .10)" }, data: props.metrics.map((item) => item.sales_amount) },
@@ -75,7 +76,7 @@ function renderChart() {
         { name: "平均响应", type: "line", xAxisIndex: 1, yAxisIndex: 2, smooth: true, symbol: "none", lineStyle: { width: 2 }, data: props.metrics.map((item) => item.avg_reply_seconds) },
         { name: "满意率", type: "line", xAxisIndex: 1, yAxisIndex: 3, smooth: true, symbol: "none", lineStyle: { width: 2 }, data: props.metrics.map((item) => item.satisfaction_rate) },
       ],
-    },
+    }),
     true,
   )
 }

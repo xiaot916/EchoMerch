@@ -22,6 +22,7 @@ from app.integrations.tmall_session import (  # noqa: E402
     add_session_source_arguments,
     resolve_cps_runtime_context,
 )
+from app.integrations.session.cps import browser_fallback_port, fetch_cps_browser_json  # noqa: E402
 
 
 def fetch_cps_overview(
@@ -31,6 +32,7 @@ def fetch_cps_overview(
     cookie: str,
     tb_token: str,
     timeout: int = 30,
+    browser_port: int | None = None,
 ) -> tuple[int, int | None, str | None, int]:
     params = {
         "t": str(int(time.time() * 1000)),
@@ -70,8 +72,13 @@ def fetch_cps_overview(
         response_body = exc.read()
         status = exc.code
 
-    output.write_bytes(response_body)
     code, message = _response_status(response_body)
+    if code is None and message == "non-json response" and browser_port is not None:
+        status, response_body = fetch_cps_browser_json(
+            browser_port, CPS_OVERVIEW_URL, params, timeout=timeout,
+        )
+        code, message = _response_status(response_body)
+    output.write_bytes(response_body)
     return status, code, message, len(response_body)
 
 
@@ -132,6 +139,7 @@ def main() -> int:
         cookie=runtime.session.cookie_header,
         tb_token=runtime.tb_token,
         timeout=args.timeout,
+        browser_port=browser_fallback_port(args.session_source, args.browser_port),
     )
     print(
         json.dumps(
@@ -146,7 +154,7 @@ def main() -> int:
             indent=2,
         )
     )
-    return 0 if 200 <= status < 300 else 1
+    return 0 if 200 <= status < 300 and code in (0, 200) else 1
 
 
 if __name__ == "__main__":

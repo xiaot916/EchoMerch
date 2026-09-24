@@ -30,6 +30,10 @@ class ProductMetric(BaseModel):
     page_views: int = 0
     search_visitors: int = 0
     promotion_spend: Decimal = Decimal("0")
+    promotion_attributed_paid_amount: Decimal = Decimal("0")
+    cps_paid_amount: Decimal = Decimal("0")
+    cps_estimated_expense: Decimal = Decimal("0")
+    cps_entry_visitors: int = 0
     product_type: str = "未分类"
     series: str = "未分类"
     positioning: str = "未分类"
@@ -38,7 +42,7 @@ class ProductMetric(BaseModel):
 class ProductAnalysisDailyMetric(BaseModel):
     stat_date: date
     paid_amount: Decimal = Decimal("0")
-    buyers: int = 0
+    buyers: int | None = None
     visitors: int = 0
     add_cart_users: int = 0
     favorite_users: int = 0
@@ -75,7 +79,7 @@ class TrafficTreeNode(BaseModel):
     path: list[str] = Field(default_factory=list)
     visitors: int = 0
     paid_amount: Decimal = Decimal("0")
-    buyers: int = 0
+    buyers: int | None = None
     new_visitors: int = 0
     add_cart_users: int = 0
     favorite_users: int = 0
@@ -110,18 +114,18 @@ class PromotionSummaryMetric(BaseModel):
     direct_paid_amount: Decimal = Decimal("0")
     indirect_paid_amount: Decimal = Decimal("0")
     orders: int = 0
-    buyers: int = 0
+    buyers: int | None = None
     carts: int = 0
     favorites: int = 0
-    new_buyers: int = 0
+    new_buyers: int | None = None
     member_paid_amount: Decimal = Decimal("0")
     natural_paid_amount: Decimal = Decimal("0")
     roi: Decimal = Decimal("0")
     click_rate: Decimal = Decimal("0")
     average_click_cost: Decimal = Decimal("0")
-    click_conversion_rate: Decimal = Decimal("0")
-    buyer_acquisition_cost: Decimal = Decimal("0")
-    new_buyer_share: Decimal = Decimal("0")
+    click_conversion_rate: Decimal | None = None
+    buyer_acquisition_cost: Decimal | None = None
+    new_buyer_share: Decimal | None = None
 
 
 class PromotionDailyMetric(BaseModel):
@@ -131,9 +135,9 @@ class PromotionDailyMetric(BaseModel):
     spend: Decimal = Decimal("0")
     paid_amount: Decimal = Decimal("0")
     orders: int = 0
-    buyers: int = 0
+    buyers: int | None = None
     carts: int = 0
-    new_buyers: int = 0
+    new_buyers: int | None = None
 
 
 class PromotionDimensionMetric(BaseModel):
@@ -153,12 +157,15 @@ class PromotionDimensionMetric(BaseModel):
     direct_paid_amount: Decimal = Decimal("0")
     indirect_paid_amount: Decimal = Decimal("0")
     orders: int = 0
-    buyers: int = 0
+    buyers: int | None = None
     carts: int = 0
     favorites: int = 0
-    new_buyers: int = 0
+    new_buyers: int | None = None
     member_paid_amount: Decimal = Decimal("0")
     natural_paid_amount: Decimal = Decimal("0")
+    buyer_metric_clicks: int = 0
+    buyer_metric_spend: Decimal = Decimal("0")
+    buyer_metric_days: int = 0
 
 
 class PromotionLayerCoverage(BaseModel):
@@ -167,6 +174,17 @@ class PromotionLayerCoverage(BaseModel):
     covered_days: int = 0
     row_count: int = 0
     entity_count: int = 0
+
+
+class PromotionDataQuality(BaseModel):
+    status: Literal["complete", "partial", "empty"] = "empty"
+    expected_days: int = 0
+    covered_days: int = 0
+    valid_buyer_metric_days: int = 0
+    missing_dates: list[date] = Field(default_factory=list)
+    partial_dates: list[date] = Field(default_factory=list)
+    unavailable_metrics: list[str] = Field(default_factory=list)
+    incomplete_layers: list[str] = Field(default_factory=list)
 
 
 class PromotionWorkbenchResponse(BaseModel):
@@ -182,6 +200,7 @@ class PromotionWorkbenchResponse(BaseModel):
     items: list[PromotionDimensionMetric] = Field(default_factory=list)
     contents: list[PromotionDimensionMetric] = Field(default_factory=list)
     coverage: list[PromotionLayerCoverage] = Field(default_factory=list)
+    data_quality: PromotionDataQuality = Field(default_factory=PromotionDataQuality)
 
 
 class FlashSaleDailyMetric(BaseModel):
@@ -488,6 +507,10 @@ class CustomerDailyMetric(BaseModel):
 
 
 class MemberAnalysis(BaseModel):
+    asset_date: date | None = None
+    overview_latest_date: date | None = None
+    channel_latest_date: date | None = None
+    channel_new_members: int = 0
     total_members: int = 0
     paid_members: int = 0
     paid_amount: Decimal = Decimal("0")
@@ -643,6 +666,23 @@ class CpsAnalysis(BaseModel):
     preorder_deposit_amount: Decimal = Decimal("0")
     preorder_total_amount: Decimal = Decimal("0")
     daily_metrics: list["CpsDailyMetric"] = Field(default_factory=list)
+    product_metrics: list["CpsProductMetric"] = Field(default_factory=list)
+
+
+class CpsProductMetric(BaseModel):
+    product_id: str
+    product_name: str
+    series: str = "未分类"
+    positioning: str = "未分类"
+    entry_visitors: int = 0
+    paid_amount: Decimal = Decimal("0")
+    paid_order_count: int = 0
+    paid_buyer_count: int = 0
+    estimated_expense: Decimal = Decimal("0")
+    settled_amount: Decimal = Decimal("0")
+    settled_expense: Decimal = Decimal("0")
+    conversion_rate: Decimal = Decimal("0")
+    expense_rate: Decimal = Decimal("0")
 
 
 class CpsDailyMetric(BaseModel):

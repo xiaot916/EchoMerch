@@ -76,7 +76,7 @@ def parse_payload(payload: dict[str, Any], *, business_day: date, raw: bytes | N
     parsed: list[TaobaoCurrentPriceItemRow] = []
     for page in source_pages:
         if not isinstance(page, dict):
-            continue
+            raise TaobaoCurrentPricePayloadError("Taobao current-price page must be a JSON object.")
         rows = _find_items(page)
         code = _response_code(page)
         if code not in (0, 200, None):
@@ -106,10 +106,13 @@ def _find_items(payload: Any) -> list[Any] | None:
             rows = value.get(key) if isinstance(value, dict) else None
             if isinstance(rows, list):
                 return rows
-    return [] if _response_code(payload) == 0 else None
+    return None
 
 
 def _response_code(payload: dict[str, Any]) -> int | None:
+    ret = payload.get("ret")
+    if isinstance(ret, list) and (not ret or any(not str(value).upper().startswith("SUCCESS") for value in ret)):
+        return 1
     data = payload.get("data")
     if isinstance(data, dict) and data.get("success") is False:
         return 1

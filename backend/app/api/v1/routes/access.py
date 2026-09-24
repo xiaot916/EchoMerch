@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from typing import Any, Iterator
+
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, status
 from fastapi.routing import APIRoute
+from starlette.routing import Mount
 
 from app.api.dependencies import get_access_store, require_permission
 from app.modules.access.schemas import (
@@ -21,8 +24,8 @@ from app.modules.access.service import AccessControlStore, DuplicateUsername, Pr
 router = APIRouter()
 
 
-def _route_permission(route: APIRoute) -> str | None:
-    for dependant in route.dependant.dependencies:
+def _route_permission(route: APIRoute | Any) -> str | None:
+    for dependant in getattr(route, "dependant", None).dependencies if getattr(route, "dependant", None) else []:
         call = dependant.call
         closure = getattr(call, "__closure__", None)
         freevars = getattr(getattr(call, "__code__", None), "co_freevars", ())
@@ -34,14 +37,71 @@ def _route_permission(route: APIRoute) -> str | None:
     return None
 
 
+def _iter_api_routes(app: FastAPI) -> Iterator[Any]:
+    """Yield every registered API route, including lazily included routers.
+
+    FastAPI 0.141 no longer flattens ``include_router`` into ``APIRoute``
+    objects; it stores a single ``_IncludedRouter`` placeholder and resolves the
+    real routes on demand. Reading ``app.routes`` alone therefore finds zero
+    endpoints, so the permission audit must expand the placeholder explicitly.
+    """
+
+    pending: list[Any] = list(app.routes)
+    seen: set[int] = set()
+    while pending:
+        route = pending.pop(0)
+        if id(route) in seen:
+            continue
+        seen.add(id(route))
+        if isinstance(route, APIRoute):
+            yield route
+            continue
+        expand = getattr(route, "effective_route_contexts", None)
+        if callable(expand):
+            for context in expand():
+                original = getattr(context, "original_route", None)
+                if isinstance(original, APIRoute):
+                    yield APIRouteView(original, context)
+                elif original is not None:
+                    pending.append(original)
+        elif isinstance(route, Mount):
+            pending.extend(getattr(route, "routes", ()) or ())
+
+
+class APIRouteView:
+    """Adapts a lazily resolved route context to the ``APIRoute`` surface."""
+
+    __slots__ = ("_context", "_route")
+
+    def __init__(self, route: APIRoute, context: Any) -> None:
+        self._route = route
+        self._context = context
+
+    @property
+    def path(self) -> str:
+        return getattr(self._context, "path", None) or self._route.path
+
+    @property
+    def name(self) -> str:
+        return getattr(self._context, "name", None) or self._route.name
+
+    @property
+    def methods(self) -> set[str]:
+        return getattr(self._context, "methods", None) or self._route.methods
+
+    @property
+    def dependant(self) -> Any:
+        return getattr(self._context, "dependant", None) or self._route.dependant
+
+
 @router.get("/api-permissions", response_model=list[ApiPermissionRecord])
 def list_api_permissions(
     request: Request,
     _: Principal = Depends(require_permission("system.manage")),
 ) -> list[ApiPermissionRecord]:
     records: list[ApiPermissionRecord] = []
-    for route in request.app.routes:
-        if not isinstance(route, APIRoute) or not route.path.startswith("/api/v1"):
+    for route in _iter_api_routes(request.app):
+        if not route.path.startswith("/api/v1"):
             continue
         permission = _route_permission(route)
         module = route.path.removeprefix("/api/v1/").split("/", 1)[0]

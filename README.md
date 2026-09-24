@@ -11,8 +11,7 @@ read-only analytics workspace for the existing Tmall reporting database.
 - Store, product, traffic, and promotion reporting
 - System capability endpoint for feature boundaries
 - Multi-page admin shell with empty, loading, and error states
-- API contract catalog, daily import dry-run view, and operation guardrail center
-- Local SQLite import run registry for previewing daily dry-run batches
+- Reqable capture analysis and operation guardrail center
 - Tmall platform/store warehouse with offline SYCM overview/trend and flow overview parsers
 
 Crawler execution, scheduled jobs, coupon creation, and other business actions
@@ -247,19 +246,6 @@ For database inspection and BI, SQLite also creates two readable views:
 - `store_daily_flow_overview_metrics`: a daily flow overview view with Chinese fields such as `商品访客数`, `跳失率`, `人均浏览量`, `老访客数`, `新访客数`, `直播间访客数`, and `店铺页访客数`.
 - `store_daily_metric_values_readable`: all parsed metric rows joined with Chinese metric names, while preserving the original platform metric code for traceability.
 
-The web console can turn a dry-run plan into a local preview record:
-
-```powershell
-Invoke-RestMethod `
-  -Method Post `
-  -Uri http://127.0.0.1:8001/api/v1/imports/runs/dry-run `
-  -ContentType "application/json" `
-  -Body '{"day":"2026-07-29"}'
-```
-
-Preview records are stored in `artifacts/local/echomerch_local.sqlite3`.
-They keep run status, candidate endpoints, target tables, and mapping notes.
-
 ### Shared Console Access
 
 The console has a local role and store-scope access layer. Keep it disabled on
@@ -343,13 +329,11 @@ phone would interpret `127.0.0.1` as the phone itself.
 When the computer and phone are on the same LAN, open the frontend through the
 computer's LAN IPv4 address, for example:
 
-- `http://172.16.12.62:9568/contracts`
 - `http://172.16.12.62:9568/imports`
 - `http://172.16.12.62:9568/operations`
 
 Useful local pages:
 
-- `http://127.0.0.1:9568/contracts`
 - `http://127.0.0.1:9568/imports`
 - `http://127.0.0.1:9568/operations`
 

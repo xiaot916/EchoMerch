@@ -15,6 +15,8 @@ from app.core.local_database import (
     BYBT_ITEM_COLUMNS,
     BYBT_ITEM_TABLE,
     CPS_COLUMNS,
+    CPS_ITEM_COLUMNS,
+    CPS_ITEM_TABLE,
     CONTENT_OVERVIEW_COLUMNS,
     CONTENT_OVERVIEW_FIELDS,
     CUSTOMER_SERVICE_ACCOUNT_COLUMNS,
@@ -29,7 +31,6 @@ from app.core.local_database import (
     ENDPOINT_KEY,
     FETCHED_AT,
     FILE_SIZE,
-    FLOW_OVERVIEW_COLUMNS,
     HTTP_STATUS,
     ACTIVITY_END_TIME,
     ACTIVITY_ID,
@@ -75,16 +76,6 @@ from app.core.local_database import (
     STATUS,
     CREATED_AT,
     FIRST_SEEN_AT,
-    FLOW_AVERAGE_PAGE_VIEWS,
-    FLOW_BOUNCE_RATE,
-    FLOW_FOLLOW_STORE_BUYERS,
-    FLOW_IMAGE_TEXT_VISITORS,
-    FLOW_LIVE_ROOM_VISITORS,
-    FLOW_NEW_VISITORS,
-    FLOW_OLD_VISITORS,
-    FLOW_PRODUCT_VISITORS,
-    FLOW_SHOP_PAGE_VISITORS,
-    FLOW_SHORT_VIDEO_VISITORS,
     MEMBER_CHANNEL_NAME,
     MEMBER_NEW_COUNT,
     MEMBER_NEW_PAID_AMOUNT,
@@ -144,16 +135,10 @@ from app.warehouse.schemas import (
     MetricDefinition,
     PlatformRecord,
     ProductRankingIngestResult,
-    StoreDailyFlowOverview,
-    StoreDailyFlowOverviewMetric,
     StoreDailyOverview,
     StoreRecord,
     WarehouseIngestResult,
     WarehouseMetricIngestResult,
-)
-from app.warehouse.sycm_flow_overview import (
-    METRIC_PREFIX as FLOW_METRIC_PREFIX,
-    load_and_parse as load_and_parse_flow_overview,
 )
 from app.warehouse.sycm_customer_overview import (
     load_and_parse as load_and_parse_customer_overview,
@@ -205,6 +190,7 @@ from app.warehouse.utry_overviews import (
 from app.warehouse.cps_overview import (
     load_and_parse as load_and_parse_cps_overview,
 )
+from app.warehouse.cps_items import load_and_parse as load_and_parse_cps_items
 from app.warehouse.taobao_flash_sale import (
     load_and_parse as load_and_parse_taobao_flash_sale,
 )
@@ -231,51 +217,6 @@ from app.warehouse.sycm_item_ranking import load_and_parse as load_and_parse_ite
 
 class WarehouseDataNotAvailable(RuntimeError):
     pass
-
-
-FLOW_OVERVIEW_FIELDS = (
-    (VISITORS, "flow.uv", "人", "已确认"),
-    (FLOW_PRODUCT_VISITORS, "flow.itmUv", "人", "已确认"),
-    (PAID_BUYERS, "flow.payByrCnt", "人", "已确认"),
-    (PAGE_VIEWS, "flow.pv", "次", "已确认"),
-    (FLOW_BOUNCE_RATE, None, "%", "待确认"),
-    (FLOW_AVERAGE_PAGE_VIEWS, "flow.avgPv", "次/人", "已确认"),
-    (AVERAGE_STAY_TIME, "flow.stayTime / stayTime", "秒", "待确认"),
-    (FLOW_OLD_VISITORS, "flow.oldUv", "人", "已确认"),
-    (FLOW_NEW_VISITORS, "flow.newUv", "人", "已确认"),
-    (FLOW_FOLLOW_STORE_BUYERS, "flow.shopCltByrCnt", "人", "已确认"),
-    (FLOW_LIVE_ROOM_VISITORS, "flow.liveRoomUv", "人", "已确认"),
-    (FLOW_SHORT_VIDEO_VISITORS, "flow.shortVideoUv", "人", "已确认"),
-    (FLOW_IMAGE_TEXT_VISITORS, "flow.imageUv", "人", "已确认"),
-    (FLOW_SHOP_PAGE_VISITORS, "flow.shopVisitUv", "人", "已确认"),
-)
-
-FLOW_STORAGE_FIELDS = (
-    (VISITORS, ("uv",)),
-    (FLOW_PRODUCT_VISITORS, ("itmUv",)),
-    (PAID_BUYERS, ("payByrCnt",)),
-    (PAGE_VIEWS, ("pv",)),
-    (
-        FLOW_BOUNCE_RATE,
-        (
-            "bounceRate",
-            "bounceUvRate",
-            "bounceRate1d",
-            "bounceUvRate1d",
-            "avgBounceUvRate",
-            "bounce_uv_rate_1d_002",
-        ),
-    ),
-    (FLOW_AVERAGE_PAGE_VIEWS, ("avgPv",)),
-    (AVERAGE_STAY_TIME, ("stayTime", "stayTimeLen", "stay_time_len_1d_001")),
-    (FLOW_OLD_VISITORS, ("oldUv",)),
-    (FLOW_NEW_VISITORS, ("newUv",)),
-    (FLOW_FOLLOW_STORE_BUYERS, ("shopCltByrCnt",)),
-    (FLOW_LIVE_ROOM_VISITORS, ("liveRoomUv",)),
-    (FLOW_SHORT_VIDEO_VISITORS, ("shortVideoUv",)),
-    (FLOW_IMAGE_TEXT_VISITORS, ("imageUv",)),
-    (FLOW_SHOP_PAGE_VISITORS, ("shopVisitUv",)),
-)
 
 
 DAILY_OVERVIEW_RESPONSE_FIELDS = {
@@ -314,6 +255,12 @@ DAILY_OVERVIEW_RESPONSE_FIELDS = {
     "gotInTime24hRate": "pickup_24h_rate",
     "avgSignTimeHh": "logistics_arrival_hours",
 }
+
+
+# Home board mixes numeric score columns with free-text columns. The generic
+# ``_upsert_daily_fact_row`` coerces every value through ``Decimal``, which
+# raises ConversionSyntax for these, so they are stored verbatim.
+HOME_BOARD_TEXT_COLUMNS = frozenset({"主营类目名称", "首页看板_原始JSON"})
 
 
 class WarehouseStore:
@@ -417,91 +364,6 @@ class WarehouseStore:
                 "business_day uses the requested date; trend responses are sliced by self.statDate",
                 "platform_store_id is sourced from self.userId.value in this endpoint",
                 "all_site_promotion_spend is mapped from self.admCostFamtQzt",
-            ],
-        )
-
-    def ingest_sycm_flow_overview(
-        self,
-        source_path: Path,
-        business_day: date,
-        store_name: str,
-        platform_store_id: str = "2200573698992",
-        http_status: int = 200,
-    ) -> WarehouseMetricIngestResult:
-        parsed = load_and_parse_flow_overview(source_path, business_day)
-        artifact_id = f"{parsed.endpoint_key}:{parsed.source_sha256[:20]}"
-        now = self._now()
-
-        with self._connect(initialize=True, artifact_table=True) as conn:
-            self._seed_metric_definitions(conn, now)
-            platform_id = self._ensure_platform(conn, "tmall", "天猫", now)
-            store_id = self._ensure_store(
-                conn,
-                platform_id,
-                platform_store_id,
-                store_name,
-                now,
-            )
-            conn.execute(
-                """
-                insert into raw_response_artifacts (
-                    "证据ID", "平台ID", "店铺ID", "接口标识", "业务日期",
-                    "抓取时间", "HTTP状态码", "响应码", "来源文件", "内容SHA256",
-                    "文件大小", "解析器版本", "创建时间"
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                on conflict("内容SHA256") do update set
-                    "店铺ID" = excluded."店铺ID",
-                    "业务日期" = excluded."业务日期",
-                    "抓取时间" = excluded."抓取时间",
-                    "HTTP状态码" = excluded."HTTP状态码",
-                    "响应码" = excluded."响应码",
-                    "来源文件" = excluded."来源文件",
-                    "文件大小" = excluded."文件大小",
-                    "解析器版本" = excluded."解析器版本"
-                """,
-                (
-                    artifact_id,
-                    platform_id,
-                    store_id,
-                    parsed.endpoint_key,
-                    business_day.isoformat(),
-                    now,
-                    http_status,
-                    parsed.response_code,
-                    str(source_path),
-                    parsed.source_sha256,
-                    parsed.source_bytes,
-                    parsed.parser_version,
-                    now,
-                ),
-            )
-            flow_metrics = {
-                metric.code.removeprefix(FLOW_METRIC_PREFIX): metric.numeric_value
-                for metric in parsed.metrics
-            }
-            self._upsert_daily_fact_row(
-                conn,
-                table="store_daily_flow_overviews",
-                columns=FLOW_OVERVIEW_COLUMNS,
-                store_id=store_id,
-                business_day=business_day,
-                values={
-                    column: self._first_metric_value(flow_metrics, codes)
-                    for column, codes in FLOW_STORAGE_FIELDS
-                },
-            )
-            conn.commit()
-
-        return WarehouseMetricIngestResult(
-            platform=self.get_platform(platform_id),
-            store=self.get_store(store_id),
-            business_day=business_day,
-            source_artifact_id=artifact_id,
-            metric_count=len(parsed.metrics),
-            warnings=[
-                "flow overview metrics are stored in store_daily_flow_overviews",
-                "platform_store_id is supplied by the local store config for this endpoint",
-                "the same store and business day is replaced atomically",
             ],
         )
 
@@ -2081,6 +1943,51 @@ class WarehouseStore:
             ],
         )
 
+    def ingest_cps_items(
+        self,
+        source_path: Path,
+        business_day: date,
+        store_name: str,
+        platform_store_id: str = "2200573698992",
+        http_status: int = 200,
+    ) -> WarehouseMetricIngestResult:
+        parsed = load_and_parse_cps_items(
+            source_path, business_day, fallback_platform_store_id=platform_store_id
+        )
+        return self._ingest_product_snapshot(
+            parsed=parsed,
+            source_path=source_path,
+            business_day=business_day,
+            store_name=store_name,
+            http_status=http_status,
+            table=CPS_ITEM_TABLE,
+            columns=CPS_ITEM_COLUMNS,
+            dimensions=lambda row: (
+                row.item_id, row.item_name, row.item_url, row.item_pic_url,
+            ),
+            metrics=lambda row: (
+                row.item_price,
+                row.enter_shop_uv,
+                row.enter_shop_pv,
+                row.cart_items,
+                row.favorite_items,
+                row.payment_amount,
+                row.payment_order_count,
+                row.payment_buyer_count,
+                row.estimated_commission,
+                row.estimated_service_fee,
+                row.estimated_total_fee,
+                row.settled_commission,
+                row.settled_service_fee,
+                row.settled_total_fee,
+                row.settled_amount,
+                row.settled_order_count,
+                row.settled_buyer_count,
+                row.conversion_rate,
+            ),
+            warning="CPS item rows replace the same store and business day atomically",
+        )
+
     def ingest_taobao_flash_sale(
         self,
         source_path: Path,
@@ -2527,6 +2434,150 @@ class WarehouseStore:
             warnings=["live overview metrics are stored as one daily fact row"],
         )
 
+    def ingest_sycm_home_board(
+        self,
+        source_path: Path,
+        business_day: date,
+        store_name: str,
+        endpoint_name: str = "grow_factor",
+        platform_store_id: str = "2200573698992",
+        http_status: int = 200,
+    ) -> WarehouseMetricIngestResult:
+        """Upsert one SYCM home-board response into the home-board fact table.
+
+        The metric mapping is endpoint-specific: each home-board card has its
+        own response shape, so the parser extracts flat numeric fields and
+        this method maps them onto the canonical Chinese columns.
+        """
+        from app.warehouse.sycm_home_board import load_and_parse as parse_home_board
+        from app.core.local_database import HOME_BOARD_COLUMNS, HOME_BOARD_TABLE
+
+        parsed = parse_home_board(source_path, business_day, endpoint_name)
+        artifact_id = f"{parsed.endpoint_key}:{parsed.source_sha256[:20]}"
+        now = self._now()
+
+        with self._connect(initialize=True, artifact_table=True) as conn:
+            self._seed_metric_definitions(conn, now)
+            platform_id = self._ensure_platform(conn, "tmall", "天猫", now)
+            store_id = self._ensure_store(
+                conn,
+                platform_id,
+                platform_store_id,
+                store_name,
+                now,
+            )
+            conn.execute(
+                f"""
+                insert into raw_response_artifacts (
+                    {q(ARTIFACT_ID)}, {q(PLATFORM_ID)}, {q(STORE_ID)}, {q(ENDPOINT_KEY)},
+                    {q(BUSINESS_DAY)}, {q(FETCHED_AT)}, {q(HTTP_STATUS)}, {q(RESPONSE_CODE)},
+                    {q(SOURCE_FILE)}, {q(CONTENT_SHA256)}, {q(FILE_SIZE)},
+                    {q(PARSER_VERSION)}, {q(CREATED_AT)}
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict({q(CONTENT_SHA256)}) do update set
+                    {q(STORE_ID)} = excluded.{q(STORE_ID)},
+                    {q(BUSINESS_DAY)} = excluded.{q(BUSINESS_DAY)},
+                    {q(FETCHED_AT)} = excluded.{q(FETCHED_AT)},
+                    {q(HTTP_STATUS)} = excluded.{q(HTTP_STATUS)},
+                    {q(RESPONSE_CODE)} = excluded.{q(RESPONSE_CODE)},
+                    {q(SOURCE_FILE)} = excluded.{q(SOURCE_FILE)},
+                    {q(FILE_SIZE)} = excluded.{q(FILE_SIZE)},
+                    {q(PARSER_VERSION)} = excluded.{q(PARSER_VERSION)}
+                """,
+                (
+                    artifact_id,
+                    platform_id,
+                    store_id,
+                    f"{parsed.endpoint_key}:{endpoint_name}",
+                    business_day.isoformat(),
+                    now,
+                    http_status,
+                    parsed.response_code,
+                    str(source_path),
+                    parsed.source_sha256,
+                    parsed.source_bytes,
+                    parsed.parser_version,
+                    now,
+                ),
+            )
+            artifact_id = self._resolve_artifact_id(conn, parsed.source_sha256, artifact_id)
+
+            metric_values = {metric.code: metric.numeric_value for metric in parsed.metrics}
+            from app.warehouse.home_board_metrics import map_home_board_metrics
+            column_values = map_home_board_metrics(metric_values, endpoint_name)
+
+            source_sha256 = parsed.source_sha256
+            raw_json_path = source_path
+            try:
+                raw_json_text = source_path.read_bytes().decode("utf-8", errors="replace")[:65535]
+            except OSError:
+                raw_json_text = None
+
+            upsert_values = dict(column_values)
+            if raw_json_text:
+                upsert_values["首页看板_原始JSON"] = raw_json_text
+            category_name = parsed.text_values.get("cateLevel1Name")
+            if category_name:
+                upsert_values["主营类目名称"] = category_name
+
+            # Each home-board endpoint only carries a slice of the row's columns.
+            # Upserting the full column list would reset every other column to
+            # NULL, so on conflict only the columns this endpoint actually
+            # provides are updated. The raw JSON column is insert-only: eight
+            # endpoints share one row and the first payload is kept as evidence.
+            update_columns = [
+                column
+                for column in HOME_BOARD_COLUMNS[2:]
+                if column in upsert_values and column != "首页看板_原始JSON"
+            ]
+            if update_columns:
+                conn.execute(
+                    f"""
+                    insert into {HOME_BOARD_TABLE} (
+                        {", ".join(q(column) for column in HOME_BOARD_COLUMNS)}
+                    ) values ({", ".join("?" for _ in HOME_BOARD_COLUMNS)})
+                    on conflict({q(STORE_ID)}, {q(BUSINESS_DAY)}) do update set
+                        {", ".join(f'{q(column)} = excluded.{q(column)}' for column in update_columns)}
+                    """,
+                    (
+                        store_id,
+                        business_day.isoformat(),
+                        *[
+                            self._home_board_cell(column, upsert_values.get(column))
+                            for column in HOME_BOARD_COLUMNS[2:]
+                        ],
+                    ),
+                )
+            else:
+                conn.execute(
+                    f"""
+                    insert or ignore into {HOME_BOARD_TABLE} (
+                        {", ".join(q(column) for column in HOME_BOARD_COLUMNS)}
+                    ) values ({", ".join("?" for _ in HOME_BOARD_COLUMNS)})
+                    """,
+                    (
+                        store_id,
+                        business_day.isoformat(),
+                        *[
+                            self._home_board_cell(column, upsert_values.get(column))
+                            for column in HOME_BOARD_COLUMNS[2:]
+                        ],
+                    ),
+                )
+            conn.commit()
+
+        return WarehouseMetricIngestResult(
+            platform=self.get_platform(platform_id),
+            store=self.get_store(store_id),
+            business_day=business_day,
+            source_artifact_id=artifact_id,
+            metric_count=len(parsed.metrics),
+            warnings=[
+                f"home board {endpoint_name} stored in {HOME_BOARD_TABLE}",
+                f"platform_store_id {platform_store_id} kept in stores table only",
+            ],
+        )
+
     def ingest_sycm_live_store_performance(
         self,
         source_path: Path,
@@ -2924,47 +2975,6 @@ class WarehouseStore:
             values[field_name] = row[column] if row[column] is not None else "0"
         return StoreDailyOverview(**values)
 
-    def get_daily_flow_overview(
-        self,
-        store_id: int,
-        business_day: date | None = None,
-    ) -> StoreDailyFlowOverview | None:
-        with self._connect() as conn:
-            conditions = [f"{q(STORE_ID)} = ?"]
-            params: list[object] = [store_id]
-            if business_day:
-                conditions.append(f"{q(BUSINESS_DAY)} = ?")
-                params.append(business_day.isoformat())
-            row = conn.execute(
-                f"""
-                select *
-                from store_daily_flow_overviews
-                where {" and ".join(conditions)}
-                order by {q(BUSINESS_DAY)} desc
-                limit 1
-                """,
-                params,
-            ).fetchone()
-        if row is None:
-            return None
-
-        values = dict(row)
-        metrics = [
-            StoreDailyFlowOverviewMetric(
-                label=label,
-                metric_code=metric_code,
-                value=Decimal(str(values[label])) if values.get(label) is not None else None,
-                unit=unit,
-                confirmation_status=confirmation_status,
-            )
-            for label, metric_code, unit, confirmation_status in FLOW_OVERVIEW_FIELDS
-        ]
-        return StoreDailyFlowOverview(
-            store_id=int(values[STORE_ID]),
-            business_day=date.fromisoformat(str(values[BUSINESS_DAY])),
-            metrics=metrics,
-        )
-
     def get_activity_calendar_events(
         self,
         store_id: int,
@@ -3361,6 +3371,14 @@ class WarehouseStore:
         if value is None:
             return None
         return str(value if isinstance(value, Decimal) else Decimal(str(value)))
+
+    def _home_board_cell(self, column: str, value: object) -> str | None:
+        """Coerce one home-board column: text columns verbatim, others decimal."""
+        if value is None:
+            return None
+        if column in HOME_BOARD_TEXT_COLUMNS:
+            return str(value)
+        return self._optional_decimal(value)
 
     @staticmethod
     def _traffic_source_insert_rows(

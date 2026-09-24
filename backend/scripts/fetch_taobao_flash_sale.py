@@ -3,12 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
+import threading
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time as day_time
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
@@ -22,6 +22,8 @@ from app.integrations.tmall_session import (  # noqa: E402
 
 
 FLASH_SALE_HOME_URL = "https://myseller.taobao.com/home.htm/ltao-home/"
+FLASH_SALE_API_URL = "https://sale.taobao.com/extend/api/tbhjActivityDataQuery.json"
+FLASH_SALE_ITEMS_API_URL = "https://sale.taobao.com/extend/api/tbhjItemDataQuery.json"
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,7 @@ def fetch_taobao_flash_sale(
     output: Path,
     cookie: str,
     timeout: int = 30,
+    browser_port: int | None = None,
 ) -> FetchResult:
     timestamp = int(
         datetime.combine(day, day_time.min, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
@@ -53,9 +56,9 @@ def fetch_taobao_flash_sale(
         "endTime": str(timestamp),
         "__sm_request__": "true",
     }
+    url = f"{FLASH_SALE_API_URL}?{urlencode(params)}"
     request = Request(
-        "https://sale.taobao.com/extend/api/tbhjActivityDataQuery.json?"
-        f"{urlencode(params)}",
+        url,
         headers={
             "accept": "*/*",
             "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
@@ -85,15 +88,69 @@ def fetch_taobao_flash_sale(
     except HTTPError as exc:
         body = exc.read()
         status = exc.code
-    output.write_bytes(body)
 
     try:
         payload = json.loads(body.decode("utf-8"))
-        code, message = _response_code_and_message(payload)
     except (UnicodeDecodeError, json.JSONDecodeError):
-        code, message = None, "non-json response"
+        if browser_port is not None:
+            try:
+                status, body = _fetch_in_existing_browser(browser_port, url, timeout=timeout)
+            except RuntimeError:
+                output.write_bytes(body)
+                raise
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload = None
+    code, message = _response_code_and_message(payload) if payload is not None else (None, "non-json response")
+    output.write_bytes(body)
 
     return FetchResult(status, code, message, str(output), len(body))
+
+
+def _fetch_in_existing_browser(
+    browser_port: int, url: str, *, timeout: int, include_tb_token: bool = False,
+) -> tuple[int, bytes]:
+    from app.integrations.session.core import DrissionPageBrowser, RuntimeSessionUnavailable
+
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or f"{parsed.scheme}://{parsed.netloc}{parsed.path}" not in (
+        FLASH_SALE_API_URL, FLASH_SALE_ITEMS_API_URL,
+    ):
+        raise ValueError("千牛页面回退只支持已登记的秒杀只读报表接口。")
+    tab = DrissionPageBrowser(browser_port).find_tab(("myseller.taobao.com",))
+    if tab is None:
+        raise RuntimeSessionUnavailable("秒杀接口直连失败，且没有可复用的千牛页面。")
+    script = """(async () => {
+      const endpoint = new URL(%s);
+      if (%s) {
+        const token = document.cookie.split('; ').find(part => part.startsWith('_tb_token_='));
+        if (!token) return {error: 'missing_token'};
+        endpoint.searchParams.set('_tb_token_', decodeURIComponent(token.slice(11)));
+      }
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), %d);
+      try {
+        const response = await fetch(endpoint, {credentials: 'include', signal: controller.signal});
+        return {status: response.status, body: await response.text()};
+      } catch (_) { return {error: 'request_failed'}; }
+      finally { clearTimeout(timer); }
+    })()""" % (json.dumps(url), json.dumps(include_tb_token), max(1000, timeout * 1000))
+    result: list[object] = []
+
+    def evaluate() -> None:
+        try:
+            result.append(tab.run_cdp("Runtime.evaluate", expression=script, awaitPromise=True, returnByValue=True))
+        except Exception:
+            result.append(None)
+
+    worker = threading.Thread(target=evaluate, daemon=True, name="flash-sale-browser-fetch")
+    worker.start()
+    worker.join(timeout=max(1, timeout) + 5)
+    value = result[0].get("result", {}).get("value") if result and isinstance(result[0], dict) else None
+    if worker.is_alive() or not isinstance(value, dict) or not isinstance(value.get("body"), str):
+        raise RuntimeSessionUnavailable("千牛页面内的秒杀报表请求失败，请确认页面登录和网络状态。")
+    return int(value["status"]), value["body"].encode("utf-8")
 
 
 def main() -> int:
@@ -114,6 +171,7 @@ def main() -> int:
         day=args.day,
         output=args.output,
         cookie=session.cookie_header,
+        browser_port=args.browser_port if args.session_source == "drissionpage" else None,
     )
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
     return 0 if result.ok else 1

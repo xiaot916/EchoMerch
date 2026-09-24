@@ -98,7 +98,7 @@ class CommerceMCPService:
         MCPToolDescriptor(
             name="products.get_structure_profile",
             description="比较当前与上一周期的系列、类型、商品客单价和买家结构，定位客单价变化贡献。",
-            input_schema={"type": "object", "properties": {"store_id": {"type": "integer"}, "start_date": {"type": "string", "format": "date"}, "end_date": {"type": "string", "format": "date"}}},
+            input_schema={"type": "object", "properties": {"store_id": {"type": "integer"}, "start_date": {"type": "string", "format": "date"}, "end_date": {"type": "string", "format": "date"}, "comparison_start_date": {"type": "string", "format": "date"}, "comparison_end_date": {"type": "string", "format": "date"}}},
         ),
         MCPToolDescriptor(
             name="customer_service.get_diagnosis",
@@ -1080,8 +1080,11 @@ class CommerceMCPService:
         store_id = source._store_id
         start_date, end_date = self._bounded_range(source, arguments, days=7)
         period_days = (end_date - start_date).days + 1
-        previous_start = start_date - timedelta(days=period_days)
-        previous_end = start_date - timedelta(days=1)
+        previous_start = self._parse_date(arguments.get("comparison_start_date")) or start_date - timedelta(days=period_days)
+        previous_end = self._parse_date(arguments.get("comparison_end_date")) or start_date - timedelta(days=1)
+        if previous_start > previous_end:
+            raise ValueError("comparison_start_date must not be after comparison_end_date")
+        previous_days = (previous_end - previous_start).days + 1
 
         def aggregate(period_start: date, period_end: date) -> tuple[list[dict[str, Any]], set[str]]:
             rows = source._rows(
@@ -1195,7 +1198,7 @@ class CommerceMCPService:
             return sorted(output, key=lambda item: float(item.get("aov_contribution") or 0))
 
         missing_current = [(start_date + timedelta(days=offset)).isoformat() for offset in range(period_days) if (start_date + timedelta(days=offset)).isoformat() not in current_dates]
-        missing_previous = [(previous_start + timedelta(days=offset)).isoformat() for offset in range(period_days) if (previous_start + timedelta(days=offset)).isoformat() not in previous_dates]
+        missing_previous = [(previous_start + timedelta(days=offset)).isoformat() for offset in range(previous_days) if (previous_start + timedelta(days=offset)).isoformat() not in previous_dates]
         warnings: list[str] = []
         if missing_current or missing_previous:
             warnings.append("商品排行存在未覆盖日期，缺失日期未按 0 计入客单价比较。")
@@ -1666,18 +1669,10 @@ class CommerceMCPService:
         brand_id = str(arguments.get("brand_id") or "").strip()
         warnings: list[str] = []
         if not brand_id:
-            scoped = source._rows(
-                '''select "品牌ID" as brand_id from brand_store_scopes
-                    where "店铺ID" = ? order by is_primary desc, "创建时间" limit 1''',
-                store_id,
-            )
-            if scoped:
-                brand_id = str(scoped[0].get("brand_id") or "")
-            else:
-                brands = source._rows('''select "品牌ID" as brand_id from brands where "品牌状态" = 'active' order by "更新时间" desc limit 2''')
-                if len(brands) == 1:
-                    brand_id = str(brands[0].get("brand_id") or "")
-                    warnings.append("当前店铺未配置品牌范围，因本地仅有一个启用品牌，已使用该品牌；建议在品牌范围中建立店铺关联。")
+            brands = source._rows('''select "品牌ID" as brand_id from brands where "品牌状态" = 'active' order by "更新时间" desc limit 2''')
+            if len(brands) == 1:
+                brand_id = str(brands[0].get("brand_id") or "")
+                warnings.append("当前店铺未配置品牌范围，因本地仅有一个启用品牌，已使用该品牌；建议在品牌范围中建立店铺关联。")
         if not brand_id:
             today = date.today()
             return self._envelope(
@@ -1808,15 +1803,34 @@ class CommerceMCPService:
         source, start_date, end_date = self._source_and_range(arguments.get("store_id"), self._parse_date(arguments.get("start_date")), self._parse_date(arguments.get("end_date")))
         workbench = source.get_promotion_workbench(start_date, end_date)
         level = str(arguments.get("level") or "campaign").lower()
-        levels = {"scene": workbench.scenes, "campaign": workbench.campaigns, "product": workbench.items, "item": workbench.items, "adgroup": workbench.adgroups, "keyword": workbench.keywords, "audience": workbench.audiences}
+        levels = {
+            "scene": workbench.scenes,
+            "campaign": workbench.campaigns,
+            "product": workbench.items,
+            "item": workbench.items,
+            "adgroup": workbench.adgroups,
+            "keyword": workbench.keywords,
+            "audience": workbench.audiences,
+            "content": workbench.contents,
+            "contents": workbench.contents,
+        }
         if level not in levels:
-            raise ValueError("promotions.get_drilldown level must be scene, campaign, product, adgroup, keyword, or audience")
+            raise ValueError("promotions.get_drilldown level must be scene, campaign, product, adgroup, keyword, audience, or content")
         rows = [self._promotion_row(item) for item in levels[level]]
-        scene = str(arguments.get("scene") or "").strip(); campaign_id = str(arguments.get("campaign_id") or "").strip(); product_id = str(arguments.get("product_id") or "").strip(); query = str(arguments.get("query") or "").strip()
+        scene = str(arguments.get("scene") or "").strip(); campaign_id = str(arguments.get("campaign_id") or "").strip(); adgroup_id = str(arguments.get("adgroup_id") or "").strip(); product_id = str(arguments.get("product_id") or "").strip(); query = str(arguments.get("query") or "").strip()
         for item in rows:
-            item.setdefault("campaign_id", item.get("parent_id") if level not in {"scene", "campaign"} else item.get("dimension_id" if level == "campaign" else "campaign_id", ""))
+            if level == "campaign":
+                # PromotionDimensionMetric keeps hierarchy fields separate;
+                # campaign rows carry their identifier as dimension_id.
+                item["campaign_id"] = item.get("dimension_id") or item.get("campaign_id") or ""
+                item["campaign_name"] = item.get("dimension_name") or item.get("campaign_name") or ""
+            elif level in {"adgroup", "product", "item", "content", "contents"} and not item.get("campaign_id"):
+                item["campaign_id"] = item.get("parent_id") or ""
+            elif level in {"audience", "keyword"}:
+                item["adgroup_id"] = item.get("parent_id") or ""
         if scene: rows = [item for item in rows if item.get("scene_name") == scene]
         if campaign_id: rows = [item for item in rows if str(item.get("campaign_id") or item.get("parent_id") or item.get("dimension_id")) == campaign_id]
+        if adgroup_id: rows = [item for item in rows if str(item.get("adgroup_id") or item.get("parent_id")) == adgroup_id]
         if product_id: rows = [item for item in rows if str(item.get("subject_id") or item.get("dimension_id")) == product_id]
         if query: rows = [item for item in rows if query.casefold() in (str(item.get("dimension_name") or "") + str(item.get("subject_name") or "")).casefold() or query in str(item.get("dimension_id") or "")]
         min_spend = arguments.get("min_spend"); max_roi = arguments.get("max_roi"); efficiency = str(arguments.get("efficiency") or "").strip()
@@ -1840,7 +1854,15 @@ class CommerceMCPService:
             rows.sort(key=lambda item: (item.get(key) is None, str(item.get(key) or "").casefold()), reverse=reverse)
         total = len(rows); page = max(int(arguments.get("page") or 1), 1); page_size = min(max(int(arguments.get("page_size") or 50), 1), 200); start = (page - 1) * page_size
         page_rows = rows[start:start + page_size]
-        return self._envelope(tool="promotions.get_drilldown", context=self._context(source._store_id, start_date, end_date), status="ok" if page_rows else "no_data", data={"level": level, "total": total, "page": page, "page_size": page_size, "rows": page_rows}, metrics=[], coverage=CoverageSummary(expected_days=(end_date-start_date).days+1, covered_days=min((item.covered_days for item in workbench.coverage), default=0)), evidence=[EvidenceRecord(dataset=f"推广{level}", table="store_daily_promotion_" + ("campaigns" if level == "campaign" else "items" if level in {"item","product"} else "adgroups" if level == "adgroup" else "bidwords" if level == "keyword" else "crowds" if level == "audience" else "campaigns"), date_range=[start_date.isoformat(), end_date.isoformat()], row_count=total)], warnings=[] if page_rows else ["筛选条件下没有推广数据。"])
+        table = (
+            "store_daily_promotion_campaigns" if level in {"scene", "campaign"}
+            else "store_daily_promotion_items" if level in {"item", "product"}
+            else "store_daily_promotion_adgroups" if level == "adgroup"
+            else "store_daily_promotion_bidwords" if level == "keyword"
+            else "store_daily_promotion_crowds" if level == "audience"
+            else "store_daily_promotion_contents"
+        )
+        return self._envelope(tool="promotions.get_drilldown", context=self._context(source._store_id, start_date, end_date), status="ok" if page_rows else "no_data", data={"level": level, "total": total, "page": page, "page_size": page_size, "rows": page_rows}, metrics=[], coverage=CoverageSummary(expected_days=(end_date-start_date).days+1, covered_days=min((item.covered_days for item in workbench.coverage), default=0)), evidence=[EvidenceRecord(dataset=f"推广{level}", table=table, date_range=[start_date.isoformat(), end_date.isoformat()], row_count=total)], warnings=[] if page_rows else ["筛选条件下没有推广数据。"])
 
     def pricing_get_risk_items(self, arguments: dict[str, Any]) -> MCPEnvelope:
         return self._paged_snapshot(arguments, "pricing.get_risk_items", "store_daily_taobao_risk_price_items", {"product_id": "商品ID", "query": "商品名称"}, ["商品ID", "商品名称", "风险更新时间", "风险类型", "风险描述", "风险子描述", "最低风险价", "原价", "低价SKU数量"], order_column="最低风险价")
@@ -2510,13 +2532,14 @@ class CommerceMCPService:
         primary = next((item for item in items if item.dataset == primary_label), None)
         relevant = list(items) if include_all else [item for item in items if item.dataset == primary_label]
         missing_dates = [value.isoformat() for value in (primary.missing_dates if primary else [])]
+        latest_in_range = min(primary.latest_date, end_date) if primary and primary.latest_date else None
         return CoverageSummary(
             expected_days=expected,
             covered_days=primary.covered_days if primary else 0,
             missing_dates=missing_dates,
             missing_datasets=[item.dataset for item in relevant if item.status == "empty"],
             partial_datasets=[item.dataset for item in relevant if item.status == "partial"],
-            latest_data_date=primary.latest_date.isoformat() if primary and primary.latest_date else None,
+            latest_data_date=latest_in_range.isoformat() if latest_in_range else None,
             no_data_dates=[item.isoformat() for item in (primary.no_data_dates if primary else [])],
             no_data_datasets=[item.dataset for item in relevant if item.no_data_dates and not item.missing_dates and item.covered_days == item.expected_days],
         )

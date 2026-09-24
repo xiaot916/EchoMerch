@@ -61,11 +61,11 @@ const chartOption = computed(() => {
       },
     },
     grid: { left: 70, right: 24, top: 28, bottom: 44 },
-    xAxis: { type: "category", data: items.map((item) => item.label), axisLabel: { color: "#75867d", fontSize: 10 } },
+    xAxis: { type: "category", data: items.map((item) => item.label), axisLabel: { color: "#75867d", fontSize: 12 } },
     yAxis: { type: "value", axisLabel: { formatter: (value: number) => `${Math.round(value / 10000)}万`, color: "#8c9991" }, splitLine: { lineStyle: { color: "#edf2ef" } } },
     series: [
       { type: "bar", stack: "bridge", silent: true, itemStyle: { color: "transparent" }, emphasis: { itemStyle: { color: "transparent" } }, data: base },
-      { type: "bar", stack: "bridge", barMaxWidth: 44, label: { show: true, position: "top", color: "#52665a", fontSize: 9, formatter: (params: { dataIndex: number }) => { const item = items[params.dataIndex]; return item?.total ? currency(item.value) : `${item && item.contribution >= 0 ? "+" : ""}${currency(item?.contribution ?? 0)}` } }, data: values },
+      { type: "bar", stack: "bridge", barMaxWidth: 44, label: { show: true, position: "top", color: "#52665a", fontSize: 12, formatter: (params: { dataIndex: number }) => { const item = items[params.dataIndex]; return item?.total ? currency(item.value) : `${item && item.contribution >= 0 ? "+" : ""}${currency(item?.contribution ?? 0)}` } }, data: values },
     ],
   }
 })
@@ -96,8 +96,8 @@ const chartOption = computed(() => {
 
 <style scoped>
 .sales-growth-bridge { min-width: 0; }
-.sales-growth-summary { display: flex; align-items: center; gap: 9px; margin: 12px 14px 0; border-left: 3px solid #258d69; padding: 7px 10px; color: #2b8463; background: #f4faf7; }.sales-growth-summary.warning { border-left-color: #d49a38; color: #966b24; background: #fff9ee; }.sales-growth-summary > div { display: grid; gap: 3px; }.sales-growth-summary strong { color: #344d40; font-size: 11px; }.sales-growth-summary span { color: #75877d; font-size: 9px; line-height: 1.45; }
-.sales-driver-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; margin: 0 14px; overflow: hidden; border: 1px solid #e1e9e4; border-radius: 5px; background: #e1e9e4; }.sales-driver-strip > div { display: grid; min-width: 0; gap: 4px; padding: 9px 10px; background: #fbfdfc; }.sales-driver-strip span { color: #7f8f86; font-size: 8px; }.sales-driver-strip strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }.sales-driver-strip strong.positive { color: #17805a; }.sales-driver-strip strong.negative { color: #bd624f; }.sales-driver-strip small { color: #8d9a93; font-size: 8px; }
-.sales-growth-bridge > p { margin: 9px 14px 0; color: #89968f; font-size: 8px; line-height: 1.55; }
+.sales-growth-summary { display: flex; align-items: center; gap: 9px; margin: 12px 14px 0; border-left: 3px solid #258d69; padding: 7px 10px; color: #2b8463; background: #f4faf7; }.sales-growth-summary.warning { border-left-color: #d49a38; color: #966b24; background: #fff9ee; }.sales-growth-summary > div { display: grid; gap: 3px; }.sales-growth-summary strong { color: #344d40; font-size: 12px; }.sales-growth-summary span { color: #75877d; font-size: 12px; line-height: 1.45; }
+.sales-driver-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; margin: 0 14px; overflow: hidden; border: 1px solid #e1e9e4; border-radius: 5px; background: #e1e9e4; }.sales-driver-strip > div { display: grid; min-width: 0; gap: 4px; padding: 9px 10px; background: #fbfdfc; }.sales-driver-strip span { color: #7f8f86; font-size: 12px; }.sales-driver-strip strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }.sales-driver-strip strong.positive { color: #17805a; }.sales-driver-strip strong.negative { color: #bd624f; }.sales-driver-strip small { color: #8d9a93; font-size: 12px; }
+.sales-growth-bridge > p { margin: 9px 14px 0; color: #89968f; font-size: 12px; line-height: 1.55; }
 @media (max-width: 620px) { .sales-driver-strip { grid-template-columns: 1fr; }.sales-growth-summary { align-items: flex-start; } }
 </style>

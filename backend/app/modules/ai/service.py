@@ -14,6 +14,7 @@ from app.core.local_database import LocalDatabase
 from app.modules.ai.mcp import CommerceMCPService
 from app.modules.ai.agent_planner import AgentPlan, build_agent_plan, diagnose_agent_plan
 from app.modules.ai.page_profiles import enrich_page_context
+from app.modules.ai.management_report import build_management_review, resolve_review_ranges
 from app.modules.ai.provider import AIProviderError, AgnesProvider
 from app.modules.ai.run_registry import AIRunCancelled
 from app.modules.ai.schemas import (
@@ -32,6 +33,7 @@ from app.modules.ai.schemas import (
     Diagnosis,
     DiagnosisFinding,
     RecommendedAction,
+    SkillToolStep,
 )
 from app.modules.ai.skills import SKILLS, select_skills
 
@@ -732,31 +734,48 @@ class AIAnalysisService:
                     self._emit(on_event, "mcp", status="completed", name=tool, detail="跨域证据已返回", result_status=evidence_result.status, elapsed_ms=evidence_elapsed)
 
                 if agent_plan is not None:
-                    repair_calls = agent_plan.repair_calls(results)
-                    if repair_calls:
-                        self._emit(on_event, "planner", status="completed", name="evidence-quality-gate", detail="一级来源比较未返回分组行，追加逐日原始证据验证")
-                        steps.append(ExecutionStep(kind="planner", name="evidence-quality-gate", status="completed", detail="一级来源比较未返回分组行，追加逐日原始证据验证", elapsed_ms=0))
-                    else:
-                        self._emit(on_event, "planner", status="completed", name="evidence-quality-gate", detail="比较窗口与一级来源证据满足结论条件")
-                        steps.append(ExecutionStep(kind="planner", name="evidence-quality-gate", status="completed", detail="比较窗口与一级来源证据满足结论条件", elapsed_ms=0))
-                    for repair in repair_calls:
-                        self._check_cancelled(should_stop)
-                        repair_arguments = {**arguments, **repair.arguments}
-                        call_key = self._tool_call_key(repair.tool, repair_arguments)
-                        if call_key in executed_calls:
-                            continue
-                        executed_calls.add(call_key)
-                        self._emit(on_event, "mcp", status="running", name=repair.tool, detail=repair.description)
-                        repair_started = time.perf_counter()
-                        repair_result = self.mcp.execute(repair.tool, repair_arguments)
-                        repair_elapsed = round((time.perf_counter() - repair_started) * 1000, 1)
-                        results.append(repair_result)
-                        warnings.extend(repair_result.warnings)
-                        steps.append(ExecutionStep(kind="mcp", name=repair.tool, status="completed", detail=f"{repair.description}；返回 {repair_result.status}", elapsed_ms=repair_elapsed))
-                        self._emit(on_event, "mcp", status="completed", name=repair.tool, detail=repair.description, result_status=repair_result.status, elapsed_ms=repair_elapsed)
+                    max_quality_rounds = 2 if agent_plan.name == "promotion-efficiency-diagnosis" else 1
+                    ran_repair = False
+                    for quality_round in range(max_quality_rounds):
+                        repair_calls = agent_plan.repair_calls(results)
+                        pending: list[tuple[SkillToolStep, dict[str, object], str]] = []
+                        for repair in repair_calls:
+                            repair_arguments = {**arguments, **repair.arguments}
+                            call_key = self._tool_call_key(repair.tool, repair_arguments)
+                            if call_key not in executed_calls:
+                                pending.append((repair, repair_arguments, call_key))
+                        if not pending:
+                            break
+                        ran_repair = True
+                        gate_detail = (
+                            f"推广证据质量门第 {quality_round + 1} 轮：根据已返回层级选择下一层取证"
+                            if agent_plan.name == "promotion-efficiency-diagnosis"
+                            else "一级来源比较未返回分组行，追加逐日原始证据验证"
+                        )
+                        self._emit(on_event, "planner", status="completed", name="evidence-quality-gate", detail=gate_detail)
+                        steps.append(ExecutionStep(kind="planner", name="evidence-quality-gate", status="completed", detail=gate_detail, elapsed_ms=0))
+                        for repair, repair_arguments, call_key in pending:
+                            self._check_cancelled(should_stop)
+                            executed_calls.add(call_key)
+                            self._emit(on_event, "mcp", status="running", name=repair.tool, detail=repair.description)
+                            repair_started = time.perf_counter()
+                            repair_result = self.mcp.execute(repair.tool, repair_arguments)
+                            repair_elapsed = round((time.perf_counter() - repair_started) * 1000, 1)
+                            results.append(repair_result)
+                            warnings.extend(repair_result.warnings)
+                            steps.append(ExecutionStep(kind="mcp", name=repair.tool, status="completed", detail=f"{repair.description}；返回 {repair_result.status}", elapsed_ms=repair_elapsed))
+                            self._emit(on_event, "mcp", status="completed", name=repair.tool, detail=repair.description, result_status=repair_result.status, elapsed_ms=repair_elapsed)
+                    if not ran_repair:
+                        gate_detail = (
+                            "推广账户、计划和可用层级证据已满足当前结论条件"
+                            if agent_plan.name == "promotion-efficiency-diagnosis"
+                            else "比较窗口与一级来源证据满足结论条件"
+                        )
+                        self._emit(on_event, "planner", status="completed", name="evidence-quality-gate", detail=gate_detail)
+                        steps.append(ExecutionStep(kind="planner", name="evidence-quality-gate", status="completed", detail=gate_detail, elapsed_ms=0))
                     custom_diagnosis = diagnose_agent_plan(agent_plan, results)
 
-                if skill.descriptor.name == "promotion-roi":
+                if skill.descriptor.name == "promotion-roi" and agent_plan is None:
                     efficiency = next((item for item in results if item.tool == "promotions.get_efficiency"), None)
                     scenes = (efficiency.data.get("scenes") if efficiency else None) or []
                     low_scenes = sorted([item for item in scenes if float(item.get("spend") or 0) > 0 and float(item.get("roi") or 0) < 1.5], key=lambda item: float(item.get("spend") or 0), reverse=True)[:2]
@@ -1594,11 +1613,18 @@ class AIAnalysisService:
         from datetime import date, timedelta
 
         source = self.mcp.analytics._source_for_store(store_id)
-        _minimum, maximum = source.get_date_bounds()
+        minimum, maximum = source.get_date_bounds()
         anchor = request.anchor_date or maximum
         if anchor > maximum:
             anchor = maximum
-        if request.report_type == "daily":
+        comparison_start = comparison_end = None
+        if request.report_type == "business_review":
+            start_date, end_date, comparison_start, comparison_end = resolve_review_ranges(
+                request,
+                minimum=minimum,
+                maximum=maximum,
+            )
+        elif request.report_type == "daily":
             start_date = end_date = anchor
         elif request.report_type == "weekly":
             start_date = anchor - timedelta(days=6)
@@ -1610,8 +1636,11 @@ class AIAnalysisService:
             start_date = anchor.replace(day=1)
             end_date = anchor
         skill = next(skill for skill in SKILLS if skill.descriptor.name == "period-report-generation")
+        planner_detail = f"已按 {request.report_type} 解析报告区间：{start_date} 至 {end_date}"
+        if comparison_start and comparison_end:
+            planner_detail += f"；对比 {comparison_start} 至 {comparison_end}"
         execution_steps = [
-            ExecutionStep(kind="planner", name="period-report-router", status="completed", detail=f"已按 {request.report_type} 解析报告区间：{start_date} 至 {end_date}", elapsed_ms=0),
+            ExecutionStep(kind="planner", name="period-report-router", status="completed", detail=planner_detail, elapsed_ms=0),
             ExecutionStep(kind="skill", name=skill.descriptor.name, status="completed", detail=f"已加载周期报告能力：{skill.descriptor.display_name}", elapsed_ms=0),
         ]
         self._emit(on_event, "planner", status="completed", name="period-report-router", detail=f"已选择报告能力：{skill.descriptor.display_name}")
@@ -1623,15 +1652,70 @@ class AIAnalysisService:
             "store_id": store_id,
             "start_date": start_date,
             "end_date": end_date,
-            "report_type": request.report_type,
+            "report_type": "daily_series" if request.report_type == "business_review" else request.report_type,
         })
         data_elapsed = round((time.perf_counter() - data_started) * 1000, 1)
         execution_steps.append(ExecutionStep(kind="mcp", name="reports.build_period_report", status="completed", detail=f"汇总经营数据并校验覆盖 · {result.status}", elapsed_ms=data_elapsed))
         self._emit(on_event, "mcp", status="completed", name="reports.build_period_report", detail=f"报告数据已返回 · {result.status}", result_status=result.status, elapsed_ms=data_elapsed)
+        report_results = [result]
+        management_artifacts: list[ArtifactSpec] = []
+        management_warnings: list[str] = []
+        if request.report_type == "business_review" and comparison_start and comparison_end:
+            self._emit(on_event, "mcp", status="running", name="reports.build_management_review", detail="正在汇总同比、商品、流量、客户、会员和客服证据")
+            review_started = time.perf_counter()
+            comparison_result = self.mcp.execute("reports.build_period_report", {
+                "store_id": store_id,
+                "start_date": comparison_start,
+                "end_date": comparison_end,
+                "report_type": "daily_series",
+            })
+            support_results: dict[str, MCPEnvelope] = {}
+            support_failures: list[str] = []
+            support_queries = {
+                "traffic_current": ("data.query", {"dataset": "traffic_sources", "dimensions": ["source"], "measures": ["gmv", "visitors", "buyers"], "order_by": ["-gmv"], "limit": 100, "start_date": start_date, "end_date": end_date}),
+                "traffic_comparison": ("data.query", {"dataset": "traffic_sources", "dimensions": ["source"], "measures": ["gmv", "visitors", "buyers"], "order_by": ["-gmv"], "limit": 100, "start_date": comparison_start, "end_date": comparison_end}),
+                "customers_current": ("data.query", {"dataset": "customers", "dimensions": [], "measures": ["new_visitors", "new_paid_buyers", "no_purchase_returners", "no_purchase_buyers", "repeat_returners", "repeat_buyers"], "start_date": start_date, "end_date": end_date}),
+                "customers_comparison": ("data.query", {"dataset": "customers", "dimensions": [], "measures": ["new_visitors", "new_paid_buyers", "no_purchase_returners", "no_purchase_buyers", "repeat_returners", "repeat_buyers"], "start_date": comparison_start, "end_date": comparison_end}),
+                "members_current": ("data.query", {"dataset": "members", "dimensions": [], "measures": ["gmv", "member_buyers", "new_members"], "start_date": start_date, "end_date": end_date}),
+                "members_comparison": ("data.query", {"dataset": "members", "dimensions": [], "measures": ["gmv", "member_buyers", "new_members"], "start_date": comparison_start, "end_date": comparison_end}),
+                "service_current": ("data.query", {"dataset": "customer_service", "dimensions": [], "measures": ["consultations", "buyers", "gmv", "avg_response_seconds", "consult_conversion_rate"], "start_date": start_date, "end_date": end_date}),
+                "service_comparison": ("data.query", {"dataset": "customer_service", "dimensions": [], "measures": ["consultations", "buyers", "gmv", "avg_response_seconds", "consult_conversion_rate"], "start_date": comparison_start, "end_date": comparison_end}),
+                "product_structure": ("products.get_structure_profile", {"start_date": start_date, "end_date": end_date, "comparison_start_date": comparison_start, "comparison_end_date": comparison_end}),
+            }
+            for key, (tool, arguments) in support_queries.items():
+                self._check_cancelled(should_stop)
+                try:
+                    support_results[key] = self.mcp.execute(tool, {"store_id": store_id, **arguments})
+                except (ValueError, RuntimeError) as exc:
+                    support_failures.append(f"{key}：{exc}")
+            report_results.extend([comparison_result, *support_results.values()])
+            review_data, management_artifacts, management_warnings = build_management_review(
+                current=result.data,
+                comparison=comparison_result.data,
+                request=request,
+                current_range=(start_date, end_date),
+                comparison_range=(comparison_start, comparison_end),
+                support={key: envelope.data for key, envelope in support_results.items()},
+            )
+            if support_failures:
+                management_warnings.append("部分复盘模块不可用：" + "；".join(support_failures))
+            result = result.model_copy(update={
+                "data": review_data,
+                "status": "partial" if any(item.status == "partial" for item in report_results) else result.status,
+                "warnings": list(dict.fromkeys([*result.warnings, *comparison_result.warnings, *management_warnings])),
+            })
+            report_results[0] = result
+            review_elapsed = round((time.perf_counter() - review_started) * 1000, 1)
+            execution_steps.append(ExecutionStep(kind="mcp", name="reports.build_management_review", status="completed", detail="经营复盘结构化证据已汇总", elapsed_ms=review_elapsed))
+            self._emit(on_event, "mcp", status="completed", name="reports.build_management_review", detail="同比与多域经营证据已完成", elapsed_ms=review_elapsed)
         if request.target_gmv is not None:
             import calendar
             current_gmv = float(result.data.get("operations", {}).get("gmv") or 0)
-            if request.report_type in {"monthly", "mtd"}:
+            if request.report_type == "business_review":
+                total_days = max((end_date - start_date).days + 1, 1)
+                time_progress = None
+                remaining_days = 0
+            elif request.report_type in {"monthly", "mtd"}:
                 total_days = calendar.monthrange(end_date.year, end_date.month)[1]
                 time_progress = end_date.day / total_days * 100
                 remaining_days = max(total_days - end_date.day, 0)
@@ -1653,14 +1737,15 @@ class AIAnalysisService:
                 "remaining_gmv": remaining_gmv,
                 "remaining_days": remaining_days,
                 "required_daily_gmv": round(remaining_gmv / remaining_days, 2) if remaining_days else None,
-                "time_progress": round(time_progress, 2),
-                "pace_gap": round(completion_rate - time_progress, 2) if completion_rate is not None else None,
+                "time_progress": round(time_progress, 2) if time_progress is not None else None,
+                "pace_gap": round(completion_rate - time_progress, 2) if completion_rate is not None and time_progress is not None else None,
                 "source": "用户输入",
             }
             result = result.model_copy(update={"data": report_data})
-        title_map = {"daily": "经营日报", "weekly": "经营周报", "monthly": "经营月报", "mtd": "经营 MTD 报告", "daily_series": "逐日经营日报"}
+            report_results[0] = result
+        title_map = {"daily": "经营日报", "weekly": "经营周报", "monthly": "经营月报", "mtd": "经营 MTD 报告", "daily_series": "逐日经营日报", "business_review": "经营复盘报告"}
         diagnosis = self._enrich_diagnosis(
-            skill.diagnose([result], {}),
+            skill.diagnose(report_results, {}),
             request=AnalysisRequest(
                 question=title_map.get(request.report_type, "经营报告"),
                 store_id=store_id,
@@ -1668,13 +1753,30 @@ class AIAnalysisService:
                 end_date=end_date,
                 use_model=request.use_model,
             ),
-            results=[result],
+            results=report_results,
             skill_inputs={},
             skill=skill,
         )
+        if management_artifacts:
+            diagnosis_updates = {
+                "artifacts": [*management_artifacts, *diagnosis.artifacts],
+                "assumptions": list(dict.fromkeys([
+                    *diagnosis.assumptions,
+                    "系统事实、计算推导、人工输入和 AI 判断已分层；AI 不改写结构化指标。",
+                ])),
+                "causal_boundary": "经营事件用于辅助解释，不自动证明因果；渠道归因、推广成交和会员身份可能重叠，不能直接加总。",
+            }
+            if request.report_type == "business_review":
+                # The review joins current, comparison and supporting domains.
+                # Its headline coverage must remain scoped to the selected
+                # current period; support-domain gaps stay in report warnings
+                # and module data-quality fields instead of being merged into
+                # a false cross-period missing-date list.
+                diagnosis_updates["coverage"] = result.coverage
+            diagnosis = diagnosis.model_copy(update=diagnosis_updates)
         provider_name = "rules"
         model_name = None
-        warnings = list(result.warnings)
+        warnings = list(dict.fromkeys(item for envelope in report_results for item in envelope.warnings))
         text = self._period_report_text(request.report_type, result.data, diagnosis)
         if request.use_model and self.provider.configured:
             self._emit(on_event, "model", status="running", name=self.provider.model, detail="正在生成报告解读")
@@ -1683,9 +1785,16 @@ class AIAnalysisService:
                 provider_kwargs = {
                     "question": title_map[request.report_type],
                     "diagnosis": diagnosis,
-                    "evidence": [item.model_dump(mode="json") for item in result.evidence],
-                    "mcp_results": self._model_mcp_results([result]),
-                    "context": {"store_id": store_id, "report_type": request.report_type, **self._conversation_prompt_context(conversation)},
+                    "evidence": [item.model_dump(mode="json") for envelope in report_results for item in envelope.evidence],
+                    "mcp_results": self._model_mcp_results(report_results),
+                    "context": {
+                        "store_id": store_id,
+                        "report_type": request.report_type,
+                        "business_events": request.business_events,
+                        "strategy_notes": request.strategy_notes,
+                        "planning_targets": request.planning_targets,
+                        **self._conversation_prompt_context(conversation),
+                    },
                 }
                 if stream_model and on_event is not None:
                     text = ""
@@ -1717,7 +1826,7 @@ class AIAnalysisService:
             report_type=request.report_type,
             range_start=start_date,
             range_end=end_date,
-            title=title_map[request.report_type],
+            title=request.report_title or title_map[request.report_type],
             text=text,
             report=result.data,
             diagnosis=diagnosis,
@@ -1740,9 +1849,11 @@ class AIAnalysisService:
                 "last_question": title_map[request.report_type],
                 "report_type": request.report_type,
                 "target_gmv": request.target_gmv,
+                "business_events": request.business_events,
                 "planning_inputs": {
                     **(conversation.memory.get("planning_inputs") if isinstance(conversation.memory.get("planning_inputs"), dict) else {}),
                     **({"target_gmv": request.target_gmv} if request.target_gmv is not None else {}),
+                    **request.planning_targets,
                 },
                 "range_start": start_date.isoformat(),
                 "range_end": end_date.isoformat(),
@@ -1766,7 +1877,14 @@ class AIAnalysisService:
                 "store_id": store_id,
                 "report_type": request.report_type,
                 "anchor_date": request.anchor_date.isoformat() if request.anchor_date else None,
+                "start_date": request.start_date.isoformat() if request.start_date else None,
+                "end_date": request.end_date.isoformat() if request.end_date else None,
+                "comparison_mode": request.comparison_mode,
+                "comparison_start_date": request.comparison_start_date.isoformat() if request.comparison_start_date else None,
+                "comparison_end_date": request.comparison_end_date.isoformat() if request.comparison_end_date else None,
                 "target_gmv": request.target_gmv,
+                "planning_targets": request.planning_targets,
+                "business_events": request.business_events,
             },
         )
         self._emit(on_event, "final", status="completed", response=response.model_dump(mode="json"))
@@ -1813,7 +1931,8 @@ class AIAnalysisService:
         talents = report.get("top_talents", [])
         start = str(report.get("range_start") or "")
         end = str(report.get("range_end") or start)
-        title_map = {"daily": "日报", "weekly": "周报", "monthly": "月报", "mtd": "MTD"}
+        comparison_label = str(report.get("comparison_label") or "环比")
+        title_map = {"daily": "日报", "weekly": "周报", "monthly": "月报", "mtd": "MTD", "business_review": "经营复盘"}
 
         def amount(value) -> str:
             return "--" if value is None else f"{float(value) / 10000:.2f}万"
@@ -1840,6 +1959,8 @@ class AIAnalysisService:
                     report_title = f"{start_date.year % 100:02d}年-{start_date.month}月逐日经营日报"
                 elif report_type == "daily":
                     report_title = f"{start_date.year % 100:02d}年-{start_date.month}月{start_date.day}日日报"
+                elif report_type == "business_review":
+                    report_title = str(report.get("report_title") or f"{start_date.year}年经营复盘")
                 else:
                     report_title = f"{start} {title_map.get(report_type, '经营报告')}"
             except ValueError:
@@ -1852,11 +1973,11 @@ class AIAnalysisService:
             if target.get("remaining_days") and target.get("required_daily_gmv") is not None:
                 target_line += f"；剩余{amount(target.get('remaining_gmv'))}，剩余{int(target['remaining_days'])}天日均需完成{amount(target.get('required_daily_gmv'))}"
             lines.append(target_line)
-        lines.append(f"GMV：{amount(operations.get('gmv'))}（环比 {change('paid_amount')}）；去退 GMV：{amount(operations.get('net_gmv'))}；退款金额占比：{percent(operations.get('refund_rate'))}")
+        lines.append(f"GMV：{amount(operations.get('gmv'))}（{comparison_label} {change('paid_amount')}）；去退 GMV：{amount(operations.get('net_gmv'))}；退款金额占比：{percent(operations.get('refund_rate'))}")
         lines.append("1.运营数据")
         lines.append(
-            f"UV：{number(operations.get('visitors'))}（环比 {change('visitors')}）；支付买家：{number(operations.get('buyers'))}（环比 {change('buyers')}）；"
-            f"转化率：{percent(operations.get('conversion_rate'))}（环比 {change('conversion_rate')}）；客单价：¥{float(operations.get('customer_unit_price') or 0):.2f}；"
+            f"UV：{number(operations.get('visitors'))}（{comparison_label} {change('visitors')}）；支付买家：{number(operations.get('buyers'))}（{comparison_label} {change('buyers')}）；"
+            f"转化率：{percent(operations.get('conversion_rate'))}（{comparison_label} {change('conversion_rate')}）；客单价：¥{float(operations.get('customer_unit_price') or 0):.2f}；"
             f"新客支付人数占比：{percent(operations.get('new_customer_buyer_share'))}"
         )
         if operations.get("add_cart_buyers") is not None or operations.get("paid_items") is not None:

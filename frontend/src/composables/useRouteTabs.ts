@@ -14,11 +14,18 @@ const ROUTE_ALIASES: Record<string, string> = {
   "/brand-assets/products": "/products/analysis",
   "/service/performance": "/service",
   "/imports": "/imports/tasks",
+  "/analytics": "/",
+}
+
+const ROUTE_ALIAS_TITLES: Record<string, string> = {
+  "/": "经营概览",
+  "/service": "客服概览",
 }
 
 function canonicalTab(tab: WorkspaceRouteTab): WorkspaceRouteTab {
   const path = ROUTE_ALIASES[tab.path] || tab.path
-  return { ...tab, path, title: path === "/service" ? "客服概览" : tab.title }
+  const title = ROUTE_ALIAS_TITLES[path]
+  return { ...tab, path, title: title ?? tab.title }
 }
 
 function readTabs(): WorkspaceRouteTab[] {

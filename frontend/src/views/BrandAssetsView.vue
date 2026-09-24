@@ -60,7 +60,7 @@ const trendOption = computed(() => {
   return {
     color: ["#5b8def", "#35a979"],
     tooltip: { trigger: "axis", valueFormatter: (value: number) => number(Number(value)) },
-    legend: { bottom: 0, data: ["消费者数", "成交金额"], textStyle: { color: "#718179", fontSize: 11 } },
+    legend: { bottom: 0, data: ["消费者数", "成交金额"], textStyle: { color: "#718179", fontSize: 12 } },
     grid: { left: 64, right: 68, top: 24, bottom: 48 },
     xAxis: { type: "category", data: rows.map((row) => String(row["业务日期"] || "").slice(5)), boundaryGap: false, axisLabel: { color: "#829188" } },
     yAxis: [
@@ -188,7 +188,7 @@ onMounted(() => { void load() })
 .brand-refresh:disabled, .brand-query:disabled { cursor: not-allowed; opacity: .55; }
 .brand-assets-toolbar { display: flex; align-items: flex-end; gap: 12px; padding: 13px 15px; border: 1px solid #dce8e1; border-radius: 6px; background: #fff; }
 .brand-assets-toolbar label { display: grid; gap: 6px; min-width: 170px; }
-.brand-assets-toolbar label span { color: #73837a; font-size: 11px; }
+.brand-assets-toolbar label span { color: #73837a; font-size: 12px; }
 .brand-assets-toolbar select, .brand-assets-toolbar input { min-height: 34px; border: 1px solid #ccdcd2; border-radius: 4px; padding: 0 10px; color: #32483d; background: #fbfdfc; font: inherit; font-size: 12px; }
 .brand-query { margin-left: auto; color: #fff; border-color: #237b58; background: #237b58; }
 .brand-loading, .brand-error, .brand-empty-panel { display: flex; align-items: center; gap: 14px; min-height: 112px; border: 1px solid #dce8e1; border-radius: 6px; padding: 22px; background: #fff; }
@@ -200,14 +200,14 @@ onMounted(() => { void load() })
 .brand-kpi-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid #dce8e1; border-radius: 6px; background: #dce8e1; }
 .brand-kpi-grid article { display: grid; grid-template-columns: auto 1fr; align-items: center; column-gap: 8px; min-height: 92px; padding: 13px 15px; background: #fff; }
 .brand-kpi-grid svg { grid-row: span 2; color: #21845f; }
-.brand-kpi-grid span { color: #7a8b81; font-size: 11px; }
+.brand-kpi-grid span { color: #7a8b81; font-size: 12px; }
 .brand-kpi-grid strong { color: #30473a; font-size: 20px; line-height: 1.2; }
-.brand-kpi-grid small { grid-column: 2; color: #9aa69f; font-size: 10px; }
+.brand-kpi-grid small { grid-column: 2; color: #9aa69f; font-size: 12px; }
 .brand-analysis-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .brand-panel, .brand-stage-table-panel { overflow: hidden; border: 1px solid #dce8e1; border-radius: 6px; background: #fff; }
 .brand-panel > header, .brand-stage-table-panel > header { display: flex; min-height: 58px; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid #e9efeb; }
 .brand-panel h2, .brand-stage-table-panel h2 { margin: 0; color: #263b30; font-size: 16px; }
-.brand-panel header span, .brand-stage-table-panel header span { color: #899a90; font-size: 11px; }
+.brand-panel header span, .brand-stage-table-panel header span { color: #899a90; font-size: 12px; }
 .touch-table, .stage-table { display: grid; }
 .touch-row, .stage-row { display: grid; align-items: center; min-height: 46px; padding: 0 16px; border-bottom: 1px solid #edf2ee; color: #53655c; font-size: 12px; }
 .touch-row { grid-template-columns: minmax(0, 1fr) 100px 120px; }
@@ -215,7 +215,7 @@ onMounted(() => { void load() })
 .touch-row:last-child, .stage-row:last-child { border-bottom: 0; }
 .touch-row strong, .stage-row strong { color: #34483d; font-weight: 650; }
 .touch-row em, .stage-row em { color: #176b4b; font-style: normal; font-weight: 650; }
-.touch-head, .stage-head { min-height: 38px; color: #8a988f; background: #fbfdfc; font-size: 11px; }
+.touch-head, .stage-head { min-height: 38px; color: #8a988f; background: #fbfdfc; font-size: 12px; }
 @media (max-width: 900px) { .brand-assets-heading, .brand-assets-toolbar { align-items: stretch; flex-direction: column; } .brand-query { margin-left: 0; } .brand-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .brand-analysis-grid { grid-template-columns: 1fr; } }
 @media (max-width: 620px) { .brand-kpi-grid { grid-template-columns: 1fr; } .brand-assets-toolbar label { min-width: 0; } .stage-table { overflow-x: auto; } .stage-row { min-width: 610px; } .touch-row { grid-template-columns: minmax(0, 1fr) 80px 100px; } }
 </style>

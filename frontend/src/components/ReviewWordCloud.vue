@@ -6,6 +6,8 @@ import type { ECharts } from "echarts/core"
 import { CanvasRenderer } from "echarts/renderers"
 import "echarts-wordcloud"
 
+import { withChartTheme } from "@/lib/echartsTheme"
+
 use([TooltipComponent, CanvasRenderer])
 
 const props = withDefaults(defineProps<{
@@ -33,7 +35,7 @@ function renderChart(): void {
   const values = props.items.map((item) => item.count)
   const min = Math.min(...values, 1)
   const max = Math.max(...values, 1)
-  chart.setOption({
+  chart.setOption(withChartTheme({
     tooltip: {
       trigger: "item",
       formatter: (params: { name?: string; value?: number }) => `${params.name || ""}<br/>出现 ${Number(params.value || 0).toLocaleString("zh-CN")} 条`,
@@ -60,7 +62,7 @@ function renderChart(): void {
         },
       })),
     }],
-  }, true)
+  }), true)
   chart.off("click")
   chart.on("click", (params) => {
     if (params.name) emit("select", params.name)

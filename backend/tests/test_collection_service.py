@@ -77,6 +77,7 @@ def test_collection_browser_launcher_waits_for_debug_port(
     assert result.started is True
     assert result.process_id == 4321
     assert "--remote-debugging-port=9222" in launched["command"]
+    assert "--remote-allow-origins=*" in launched["command"]
     assert (tmp_path / "profile").is_dir()
 
 
@@ -92,6 +93,53 @@ def test_collection_browser_launcher_reuses_existing_port(monkeypatch: pytest.Mo
 
     assert result.reused is True
     assert result.started is False
+
+
+def test_seller_login_status_is_secret_free_and_detects_login_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(collection_browser, "browser_debug_connected", lambda _port: True)
+    monkeypatch.setattr(
+        collection_browser,
+        "_browser_page_records",
+        lambda _port: [{"type": "page", "url": collection_browser.SELLER_LOGIN_URL}],
+    )
+
+    status = collection_browser.inspect_seller_login(9222)
+
+    assert status.status == "login_required"
+    assert status.browser_connected is True
+    assert status.page_url == collection_browser.SELLER_LOGIN_URL
+    assert not hasattr(status, "cookie")
+
+
+def test_seller_login_status_does_not_treat_a_same_host_login_redirect_as_authenticated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(collection_browser, "browser_debug_connected", lambda _port: True)
+    monkeypatch.setattr(
+        collection_browser,
+        "_browser_page_records",
+        lambda _port: [{"type": "page", "url": "https://myseller.taobao.com/login"}],
+    )
+
+    assert collection_browser.inspect_seller_login(9222).status == "login_required"
+
+
+def test_seller_login_does_not_open_a_duplicate_tab(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[object] = []
+    monkeypatch.setattr(collection_browser, "browser_debug_connected", lambda _port: True)
+    monkeypatch.setattr(
+        collection_browser,
+        "_browser_page_records",
+        lambda _port: [{"type": "page", "url": collection_browser.SELLER_LOGIN_URL}],
+    )
+    monkeypatch.setattr(collection_browser, "urlopen", lambda *args, **kwargs: calls.append(args))
+
+    status = collection_browser.open_seller_login(9222)
+
+    assert status.status == "login_required"
+    assert calls == []
 
 
 def test_dataset_coverage_distinguishes_complete_partial_and_no_data(
@@ -321,6 +369,44 @@ def test_coverage_marks_history_gap_even_when_target_day_has_a_row(tmp_path: Pat
     assert coverage.contiguous_latest_date == "2026-08-30"
     assert coverage.gap_count == 7
     assert coverage.missing_dates[-1] == "2026-09-06"
+
+
+def test_home_board_sparse_row_does_not_close_coverage_gap(tmp_path: Path) -> None:
+    from scripts.backfill_sycm_home_board import _existing_days
+
+    database_path = tmp_path / "home-board-coverage.sqlite3"
+    database = LocalDatabase(database_path)
+    database.initialize_schema()
+    CrawlRunStore(database_path).ensure_store_reference(
+        store_id=1, store_name="Store 1", platform_store_id="p-1",
+    )
+    day = date(2026, 9, 22)
+    with database.connect(initialize=True, read_only=False) as conn:
+        conn.execute(
+            'insert into store_daily_sycm_home_board '
+            '("店铺ID", "业务日期", "商品体验分") values (1, ?, 4.9)',
+            (day.isoformat(),),
+        )
+        conn.commit()
+
+    assert day not in _existing_days(database, 1)
+    with database.connect() as conn:
+        coverage = CollectionService(database_path)._dataset_coverage(
+            conn, COLLECTION_DATASET_BY_KEY["sycm_home_board"], day,
+        )
+    assert coverage.status == "partial"
+    assert coverage.tables[0].raw_row_count == 1
+    assert coverage.tables[0].row_count == 0
+    assert "体验分" in coverage.error_message
+
+    with database.connect(initialize=True, read_only=False) as conn:
+        conn.execute(
+            'update store_daily_sycm_home_board set '
+            '"物流体验分"=4.9, "服务体验分"=5, "退款体验分"=4.8, '
+            '"纠纷体验分"=4.7, "主营类目ID"=201 where "店铺ID"=1',
+        )
+        conn.commit()
+    assert day in _existing_days(database, 1)
 
 
 def test_complete_dataset_does_not_surface_an_older_task_error(
@@ -704,6 +790,29 @@ def test_operational_snapshot_ingested_run_allows_valid_empty_snapshot_table(
     assert coverage.row_count == 8
 
 
+def test_current_snapshot_is_not_partial_due_to_irrecoverable_previous_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = CollectionService(tmp_path / "snapshot-gap.sqlite3")
+    dataset = COLLECTION_DATASET_BY_KEY["taobao_operational_snapshots"]
+    day = date(2026, 9, 23)
+    monkeypatch.setattr(service, "_table_coverage_for_dataset", lambda _conn, _dataset, table, _day: DatasetTableCoverage(
+        table=table, present=True, row_count=3, latest_date=day.isoformat(),
+    ))
+    monkeypatch.setattr(service, "_latest_task_attempts", lambda *_args: [{
+        "task_type": "taobao_operational_snapshots", "day_status": "ingested",
+        "run_status": "completed", "started_at": "2026-09-23T08:00:00",
+        "error_message": None,
+    }])
+    monkeypatch.setattr("app.modules.collection.service.audit_dataset_coverage", lambda *_args, **_kwargs: pytest.fail("snapshot must not replay historical gaps"))
+
+    with service.database.connect() as conn:
+        coverage = service._dataset_coverage(conn, dataset, day)
+
+    assert coverage.status == "complete"
+    assert coverage.gap_count == 0
+
+
 def test_activity_calendar_ingested_run_allows_empty_snapshot_table(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -713,8 +822,8 @@ def test_activity_calendar_ingested_run_allows_empty_snapshot_table(
     day = date(2026, 8, 20)
     monkeypatch.setattr(
         service,
-        "_table_coverage",
-        lambda _conn, table, _day: DatasetTableCoverage(
+        "_table_coverage_for_dataset",
+        lambda _conn, _dataset, table, _day: DatasetTableCoverage(
             table=table,
             present=False,
             row_count=0,
@@ -797,6 +906,62 @@ def test_schedule_resumes_all_enabled_datasets_with_refresh_for_partial_data(tmp
     assert service.trigger_schedule_if_due(
         now=datetime(2026, 8, 21, 7, 32, tzinfo=ZoneInfo("Asia/Shanghai")),
     ) is None
+
+
+def test_schedule_captures_today_before_yesterday_reports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.modules.collection import dates
+
+    service = CollectionService(tmp_path / "snapshot-schedule.sqlite3")
+    service.update_schedule(
+        enabled=True, run_time="07:30",
+        dataset_names=["taobao_operational_snapshots", "sycm_overviews"],
+        session_source="drissionpage",
+    )
+    now = datetime(2026, 9, 23, 7, 31, tzinfo=ZoneInfo("Asia/Shanghai"))
+    monkeypatch.setattr(dates, "today_in_shanghai", lambda: now.date())
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(service, "start_batch", lambda **kwargs: calls.append(kwargs) or _batch())
+    monkeypatch.setattr(service, "_snapshot_attempted_today", lambda _today: len(calls) > 0)
+
+    assert service.trigger_schedule_if_due(now=now) is not None
+    assert calls[0]["business_day"] == date(2026, 9, 23)
+    assert calls[0]["dataset_names"] == ["taobao_operational_snapshots"]
+    assert service.get_schedule().last_triggered_day is None
+
+    assert service.trigger_schedule_if_due(now=now) is not None
+    assert calls[1]["business_day"] == date(2026, 9, 22)
+    assert calls[1]["dataset_names"] == ["sycm_overviews"]
+    assert service.get_schedule().last_triggered_day == "2026-09-22"
+    assert service.trigger_schedule_if_due(now=now) is None
+
+
+def test_manual_historical_snapshot_rejected_before_batch_creation(tmp_path: Path) -> None:
+    from app.core.business_days import today_in_shanghai
+
+    service = CollectionService(tmp_path / "snapshot-rejected.sqlite3")
+    with pytest.raises(ValueError, match="无法追溯"):
+        service.start_batch(
+            business_day=date(2026, 9, 22) if today_in_shanghai() != date(2026, 9, 22) else date(2026, 9, 21),
+            dataset_names=["taobao_operational_snapshots"], session_source="drissionpage",
+            refresh_existing=True, trigger="manual",
+        )
+    with service.database.connect() as conn:
+        assert conn.execute("select count(*) from collection_batches").fetchone()[0] == 0
+
+
+def test_api_rejects_historical_snapshot_before_browser_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.modules.collection.schemas import StartCollectionRequest
+
+    monkeypatch.setattr(collection_routes, "_ensure_collection_browser", lambda: pytest.fail("unexpected browser startup"))
+    from app.core.business_days import yesterday_in_shanghai
+
+    with pytest.raises(Exception) as exc:
+        collection_routes.start_collection(StartCollectionRequest(
+            day=yesterday_in_shanghai().isoformat(),
+            dataset_names=["taobao_operational_snapshots"], session_source="drissionpage",
+        ))
+    assert getattr(exc.value, "status_code", None) == 422
+    assert "无法追溯" in str(getattr(exc.value, "detail", ""))
 
 
 def test_existing_default_schedule_picks_up_activity_calendar_dataset(tmp_path: Path) -> None:
@@ -985,6 +1150,7 @@ def test_start_batch_launches_worker_without_waiting_for_collection(
     )
 
     assert "--refresh-existing" in launched["command"]
+    assert launched["command"][launched["command"].index("--timeout") + 1] == "900"
     assert batch.process_id == 4321
     assert batch.status == "completed_with_errors"
 

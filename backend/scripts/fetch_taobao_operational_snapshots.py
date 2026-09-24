@@ -25,7 +25,7 @@ class FetchResult:
 
     @property
     def ok(self) -> bool:
-        return 200 <= self.status < 300 and self.code in (0, None)
+        return 200 <= self.status < 300 and self.code == 0
 
 
 def fetch_risk_price(*, output: Path, cookie: str, timeout: int = 30, size: int = 100) -> FetchResult:
@@ -146,8 +146,12 @@ def _response_status(payload: dict[str, Any]) -> tuple[int | None, str | None]:
     if payload.get("success") is False:
         return 1, str(payload.get("message") or payload.get("msg") or "request failed")
     ret = payload.get("ret")
-    if isinstance(ret, list) and any("FAIL" in str(value).upper() for value in ret):
-        return 1, str(ret[0])
+    if isinstance(ret, list) and (not ret or any(not str(value).upper().startswith("SUCCESS") for value in ret)):
+        return 1, str(ret[0]) if ret else "empty MTop result"
+    data = payload.get("data")
+    model = data.get("model") if isinstance(data, dict) else None
+    if isinstance(model, dict) and model.get("success") is False:
+        return 1, "MTop model reported failure"
     value = payload.get("code", payload.get("retCode"))
     try:
         code = int(value) if value is not None else 0

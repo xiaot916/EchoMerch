@@ -42,7 +42,6 @@ DATASET_DEFINITIONS: tuple[StoreDatasetDefinition, ...] = (
     StoreDatasetDefinition("taobao_activity_snapshots", "淘宝活动商品快照", "store_daily_taobao_activity_item_snapshots", "百补/秒杀在线与待上线商品快照"),
     StoreDatasetDefinition("utry_sample", "U先派样数据", "store_daily_utry_sample_overviews", "U先派样商品与新客指标"),
     StoreDatasetDefinition("utry_repurchase", "U先复购数据", "store_daily_utry_repurchase_overviews", "U先商品复购指标"),
-    StoreDatasetDefinition("flow_overview", "流量旧概览", "store_daily_flow_overviews", "旧版流量概览指标；与流量来源明细分开"),
 )
 
 _DEFINITIONS_BY_KEY = {item.key: item for item in DATASET_DEFINITIONS}

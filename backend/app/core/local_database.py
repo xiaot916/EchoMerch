@@ -265,6 +265,25 @@ TAOBAO_FLASH_SALE_ITEM_COLUMNS = (
     STORE_ID, BUSINESS_DAY, *TAOBAO_FLASH_SALE_ITEM_DIMENSIONS, *TAOBAO_FLASH_SALE_ITEM_METRICS,
 )
 
+# CPS (淘宝客) item-level promotion facts, from ad.alimama.com
+# analysis.data.itemAnalysisTopList.json (商品分析报表, supports 13-month lookback).
+CPS_ITEM_TABLE = "store_daily_cps_items"
+CPS_ITEM_DIMENSIONS = (
+    "商品ID", "商品名称", "商品链接", "商品图片",
+)
+CPS_ITEM_METRICS = (
+    "商品单价",
+    "淘客进店UV", "淘客进店PV", "加购件数", "收藏件数",
+    "付款金额", "付款笔数", "付款人数",
+    "预估佣金", "预估服务费", "预估总费用",
+    "结算佣金", "结算服务费", "结算总费用",
+    "结算金额", "结算笔数", "结算人数",
+    "付款转化率",
+)
+CPS_ITEM_COLUMNS = (
+    STORE_ID, BUSINESS_DAY, *CPS_ITEM_DIMENSIONS, *CPS_ITEM_METRICS,
+)
+
 # Taobao operational snapshots are deliberately separate from promotion
 # performance facts.  They describe the current item/risk/activity state and
 # are replaced for the same store/day on each successful collection.
@@ -561,10 +580,8 @@ PRODUCT_CATALOG_COLUMNS = (
 INVENTORY_PRODUCT_CATALOG_TABLE = "inventory_product_catalog"
 
 # Brand Data Bank is a separate analytical subject from store operations.
-# Brand facts intentionally do not carry a store id; store links are kept in
-# brand_store_scopes only for authorization and drill-through context.
+# Brand facts intentionally do not carry a store id.
 BRAND_TABLE = "brands"
-BRAND_STORE_SCOPE_TABLE = "brand_store_scopes"
 BRAND_ASSET_OVERVIEW_TABLE = "brand_asset_daily_overviews"
 BRAND_ASSET_STAGE_TABLE = "brand_asset_daily_stages"
 BRAND_ASSET_DIMENSION_TABLE = "brand_asset_daily_dimensions"
@@ -1066,6 +1083,29 @@ LIVE_TALENT_COLUMNS = (
     "成交件数",
     "成交笔数",
 )
+# SYCM 首页看板（增长因子 / 月度经营 / 体验分 / 店铺层级）每日宽表。
+HOME_BOARD_TABLE = "store_daily_sycm_home_board"
+HOME_BOARD_COLUMNS = (
+    STORE_ID,
+    BUSINESS_DAY,
+    "增长因子_交易分",
+    "增长因子_流量分",
+    "增长因子_商品分",
+    "增长因子_营销分",
+    "增长因子_服务分",
+    "层级等级",
+    "层级分数",
+    "层级排名百分位",
+    "体验总分",
+    "商品体验分",
+    "物流体验分",
+    "服务体验分",
+    "退款体验分",
+    "纠纷体验分",
+    "主营类目ID",
+    "主营类目名称",
+    "首页看板_原始JSON",
+)
 CUSTOMER_SERVICE_ACCOUNT_LEGACY_ALIASES: dict[str, tuple[str, ...]] = {
     STORE_ID: (STORE_ID, "store_id"),
     BUSINESS_DAY: (BUSINESS_DAY, "business_day"),
@@ -1163,24 +1203,6 @@ CUSTOMER_SERVICE_ACCOUNT_LEGACY_ALIASES: dict[str, tuple[str, ...]] = {
         "csNetPayAmt",
     ),
 }
-FLOW_OVERVIEW_COLUMNS = (
-    STORE_ID,
-    BUSINESS_DAY,
-    VISITORS,
-    FLOW_PRODUCT_VISITORS,
-    PAID_BUYERS,
-    PAGE_VIEWS,
-    FLOW_BOUNCE_RATE,
-    FLOW_AVERAGE_PAGE_VIEWS,
-    AVERAGE_STAY_TIME,
-    FLOW_OLD_VISITORS,
-    FLOW_NEW_VISITORS,
-    FLOW_FOLLOW_STORE_BUYERS,
-    FLOW_LIVE_ROOM_VISITORS,
-    FLOW_SHORT_VIDEO_VISITORS,
-    FLOW_IMAGE_TEXT_VISITORS,
-    FLOW_SHOP_PAGE_VISITORS,
-)
 
 SIMPLE_DAILY_FACT_TABLES: dict[str, tuple[str, ...]] = {
     "store_daily_shopping_gold_overviews": SHOPPING_GOLD_COLUMNS,
@@ -1193,13 +1215,14 @@ SIMPLE_DAILY_FACT_TABLES: dict[str, tuple[str, ...]] = {
     "store_daily_customer_service_overviews": CUSTOMER_SERVICE_OVERVIEW_COLUMNS,
     "store_daily_live_overviews": LIVE_OVERVIEW_COLUMNS,
     "store_daily_live_store_performance": LIVE_STORE_PERFORMANCE_COLUMNS,
-    "store_daily_flow_overviews": FLOW_OVERVIEW_COLUMNS,
+    "store_daily_sycm_home_board": HOME_BOARD_COLUMNS,
 }
 DIMENSION_DAILY_FACT_TABLES: dict[
     str,
     tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]],
 ] = {
     BYBT_ITEM_TABLE: (BYBT_ITEM_COLUMNS, BYBT_ITEM_DIMENSIONS, ("商品ID", "营销ID")),
+    CPS_ITEM_TABLE: (CPS_ITEM_COLUMNS, CPS_ITEM_DIMENSIONS, ("商品ID",)),
     TAOBAO_FLASH_SALE_ITEM_TABLE: (
         TAOBAO_FLASH_SALE_ITEM_COLUMNS,
         TAOBAO_FLASH_SALE_ITEM_DIMENSIONS,
@@ -1989,7 +2012,11 @@ DAILY_OVERVIEW_LEGACY_ALIASES: dict[str, tuple[str, ...]] = {
 class LocalDatabase:
     """Shared local SQLite schema with readable Chinese business columns."""
 
-    SCHEMA_VERSION: ClassVar[int] = 1
+    # Bump this whenever a table/column is added to ``_ensure_schema``.
+    # ``initialize_schema`` only re-runs ``_ensure_schema`` when the stored
+    # version differs, so an existing database would otherwise never pick up
+    # newly registered tables (e.g. store_daily_cps_items, promotion_intel).
+    SCHEMA_VERSION: ClassVar[int] = 2
     _schema_lock: ClassVar[threading.RLock] = threading.RLock()
     _initialized_paths: ClassVar[set[Path]] = set()
 
@@ -3042,11 +3069,112 @@ class LocalDatabase:
             'create index if not exists "idx_crawl_run_days_day" '
             f'on crawl_run_days({q(STORE_ID)}, {q(BUSINESS_DAY)})'
         )
+        self._ensure_promotion_intel_schema(conn)
         self._migrate_legacy_flow_metrics(conn)
         conn.execute('drop table if exists "store_daily_metrics"')
         self._drop_business_views(conn)
         conn.execute('drop table if exists "raw_response_artifacts"')
         conn.commit()
+
+    @staticmethod
+    def _ensure_promotion_intel_schema(conn: sqlite3.Connection) -> None:
+        """Create the promotion-intel closed-loop tables.
+
+        These are new tables (no legacy migration path), so they are plain
+        ``create table if not exists``.  They back the diagnosis → strategy →
+        execution → rollback → review pipeline in
+        :mod:`app.modules.promotion_intel`:
+
+        - ``promotion_optimization_plans``: one row per optimization batch.
+        - ``optimization_plan_items``: one row per concrete action.
+        - ``optimization_snapshots``: rollback baselines (JSON payloads).
+        - ``optimization_review_runs``: T+N review verdicts + ledger rows.
+        """
+        conn.executescript(
+            f"""
+            create table if not exists promotion_optimization_plans (
+                plan_id text primary key,
+                store_id integer not null default 0,
+                batch_name text not null default '',
+                source text not null default 'rule',
+                status text not null default 'draft',
+                generated_at text not null,
+                generated_by text not null default 'system',
+                window_days integer not null default 30,
+                baseline_json text not null default '{{}}',
+                rollback_snapshot text not null default '',
+                executed_at text not null default '',
+                notes text not null default ''
+            );
+
+            create index if not exists idx_promo_plans_store_status
+            on promotion_optimization_plans(store_id, status);
+            create index if not exists idx_promo_plans_generated
+            on promotion_optimization_plans(generated_at desc);
+
+            create table if not exists optimization_plan_items (
+                item_id text primary key,
+                plan_id text not null
+                    references promotion_optimization_plans(plan_id) on delete cascade,
+                target_type text not null,
+                target_id text not null,
+                target_name text not null default '',
+                scene text not null default 'onebpSearch',
+                campaign_id text not null default '',
+                adgroup_id text not null default '',
+                action text not null,
+                before_value text not null default '',
+                after_value text not null default '',
+                reason text not null default '',
+                channel text not null default 'onebp_write',
+                status text not null default 'pending',
+                error text not null default '',
+                executed_at text not null default ''
+            );
+
+            create index if not exists idx_promo_items_plan
+            on optimization_plan_items(plan_id);
+            create index if not exists idx_promo_items_target
+            on optimization_plan_items(target_type, target_id);
+
+            create table if not exists optimization_snapshots (
+                snapshot_id text primary key,
+                plan_id text not null
+                    references promotion_optimization_plans(plan_id) on delete cascade,
+                created_at text not null,
+                campaigns_json text not null default '[]',
+                words_json text not null default '[]',
+                crowds_json text not null default '[]',
+                budgets_json text not null default '[]',
+                metadata_json text not null default '{{}}',
+                applied integer not null default 0
+            );
+
+            create index if not exists idx_promo_snapshots_plan
+            on optimization_snapshots(plan_id);
+
+            create table if not exists optimization_review_runs (
+                review_id text primary key,
+                plan_id text not null
+                    references promotion_optimization_plans(plan_id) on delete cascade,
+                store_id integer not null default 0,
+                review_day text not null,
+                window_days integer not null default 7,
+                cvr real not null default 0,
+                roi real not null default 0,
+                break_even_roi real not null default 2.5,
+                verdict text not null default 'no_data',
+                action_taken text not null default '',
+                executed_at text not null default '',
+                notes text not null default ''
+            );
+
+            create index if not exists idx_promo_review_plan
+            on optimization_review_runs(plan_id);
+            create index if not exists idx_promo_review_day
+            on optimization_review_runs(review_day);
+            """
+        )
 
     @staticmethod
     def _ensure_brand_schema(conn: sqlite3.Connection) -> None:
@@ -3066,13 +3194,6 @@ class LocalDatabase:
                 {q(BRAND_STATUS)} text not null default 'active',
                 {q(CREATED_AT)} text not null,
                 {q(UPDATED_AT)} text not null
-            );
-            create table if not exists {BRAND_STORE_SCOPE_TABLE} (
-                {q(BRAND_ID)} text not null references {BRAND_TABLE}({q(BRAND_ID)}) on delete cascade,
-                {q(STORE_ID)} integer not null references stores({q(STORE_ID)}) on delete cascade,
-                is_primary integer not null default 0 check (is_primary in (0, 1)),
-                {q(CREATED_AT)} text not null,
-                primary key ({q(BRAND_ID)}, {q(STORE_ID)})
             );
             create table if not exists {BRAND_ASSET_OVERVIEW_TABLE} (
                 {q(BRAND_ID)} text not null references {BRAND_TABLE}({q(BRAND_ID)}) on delete cascade,
@@ -3233,8 +3354,6 @@ class LocalDatabase:
                 foreign key ({q(BRAND_ID)}, {q(BRAND_PRODUCT_ID)})
                     references {BRAND_PRODUCT_TABLE}({q(BRAND_ID)}, {q(BRAND_PRODUCT_ID)}) on delete cascade
             );
-            create index if not exists idx_brand_store_scopes_store
-                on {BRAND_STORE_SCOPE_TABLE}({q(STORE_ID)});
             create index if not exists idx_brand_asset_overview_day
                 on {BRAND_ASSET_OVERVIEW_TABLE}({q(BRAND_ID)}, {q(BUSINESS_DAY)});
             create index if not exists idx_brand_asset_stage_day
@@ -3389,10 +3508,9 @@ class LocalDatabase:
             (
                 ("analytics.read", "查看经营数据", "查看店铺经营、商品、流量、客户和营销指标。"),
                 ("warehouse.read", "查看数据仓库", "查看店铺、日概览、指标和活动数据。"),
-                ("imports.read", "查看采集记录", "查看采集计划、运行记录和进度。"),
-                ("imports.manage", "管理采集计划", "创建本地采集预览和后续受控任务。"),
+                ("imports.read", "查看采集记录", "查看采集批次、运行记录和进度。"),
+                ("imports.manage", "管理采集任务", "创建和重试受控采集任务。"),
                 ("captures.read", "查看采集实验室", "查看脱敏的抓包摘要。"),
-                ("contracts.read", "查看接口契约", "查看脱敏的接口契约与字段结构。"),
                 ("operations.read", "查看操作中心", "查看受控操作能力和安全状态。"),
                 ("system.read", "查看系统状态", "查看系统能力和运行状态。"),
                 ("access.manage", "管理用户权限", "管理用户、角色和店铺数据授权。"),
@@ -3401,6 +3519,16 @@ class LocalDatabase:
                 ("system.manage", "系统设置", "访问用户、角色、菜单和接口权限配置。"),
             ),
         )
+        remove_contract_permission = "20260922_remove_contract_permission"
+        if conn.execute(
+            "select 1 from access_schema_migrations where migration_code = ?",
+            (remove_contract_permission,),
+        ).fetchone() is None:
+            conn.execute("delete from access_permissions where permission_code = 'contracts.read'")
+            conn.execute(
+                "insert into access_schema_migrations (migration_code, applied_at) values (?, datetime('now'))",
+                (remove_contract_permission,),
+            )
         from app.modules.access.catalog import MENU_DEFINITIONS
 
         existing_menu_codes = {
@@ -3451,7 +3579,7 @@ class LocalDatabase:
         business_permissions = ["analytics.read", "warehouse.read", "brand_assets.read"]
         role_permissions = {
             "super_admin": [
-                *business_permissions, "imports.read", "imports.manage", "captures.read", "contracts.read",
+                *business_permissions, "imports.read", "imports.manage", "captures.read",
                 "operations.read", "system.read", "access.manage", "data.manage", "system.manage",
             ],
             "admin": business_permissions,
@@ -4890,49 +5018,6 @@ class LocalDatabase:
             """
         )
 
-        conn.execute('drop view if exists "store_daily_flow_overview_metrics"')
-        conn.execute(
-            f"""
-            create view "store_daily_flow_overview_metrics" as
-            select
-                m.{q(STORE_ID)} as {q(STORE_ID)},
-                m.{q(BUSINESS_DAY)} as {q(BUSINESS_DAY)},
-                {metric_value("flow.uv", VISITORS)},
-                {metric_value("flow.itmUv", FLOW_PRODUCT_VISITORS)},
-                {metric_value("flow.payByrCnt", PAID_BUYERS)},
-                {metric_value("flow.pv", PAGE_VIEWS)},
-                {coalesced_metric_value((
-                    "flow.bounceRate",
-                    "flow.bounceUvRate",
-                    "flow.bounceRate1d",
-                    "flow.bounceUvRate1d",
-                    "flow.avgBounceUvRate",
-                    "flow.bounce_uv_rate_1d_002",
-                ), FLOW_BOUNCE_RATE)},
-                {metric_value("flow.avgPv", FLOW_AVERAGE_PAGE_VIEWS)},
-                {coalesced_metric_value((
-                    "flow.stayTime",
-                    "flow.stayTimeLen",
-                    "flow.stay_time_len_1d_001",
-                    "stayTime",
-                ), AVERAGE_STAY_TIME)},
-                {metric_value("flow.oldUv", FLOW_OLD_VISITORS)},
-                {metric_value("flow.newUv", FLOW_NEW_VISITORS)},
-                {metric_value("flow.shopCltByrCnt", FLOW_FOLLOW_STORE_BUYERS)},
-                {metric_value("flow.liveRoomUv", FLOW_LIVE_ROOM_VISITORS)},
-                {metric_value("flow.shortVideoUv", FLOW_SHORT_VIDEO_VISITORS)},
-                {metric_value("flow.imageUv", FLOW_IMAGE_TEXT_VISITORS)},
-                {metric_value("flow.shopVisitUv", FLOW_SHOP_PAGE_VISITORS)}
-            from store_daily_metrics m
-            where m.{q(METRIC_SCOPE)} = 'self'
-              and (m.{q(METRIC_CODE)} like 'flow.%' or m.{q(METRIC_CODE)} = 'stayTime')
-            group by
-                m.{q(STORE_ID)},
-                m.{q(BUSINESS_DAY)}
-            having max(case when m.{q(METRIC_CODE)} like 'flow.%' then 1 else 0 end) = 1
-            """
-        )
-
         conn.execute('drop view if exists "store_daily_customer_overview_metrics"')
         conn.execute(
             f"""
@@ -5053,7 +5138,6 @@ class LocalDatabase:
     def _drop_business_views(conn: sqlite3.Connection) -> None:
         for view in (
             "store_daily_business_metrics",
-            "store_daily_flow_overview_metrics",
             "store_daily_customer_overview_metrics",
             "store_daily_member_analysis_metrics",
             "store_daily_metric_values_readable",
@@ -5062,39 +5146,8 @@ class LocalDatabase:
 
     @staticmethod
     def _migrate_legacy_flow_metrics(conn: sqlite3.Connection) -> None:
-        """Move the one historical EAV dependency into the flow fact table once."""
-        return
-
-        if not LocalDatabase._table_exists(conn, "store_daily_metrics"):
-            return
-
-        def value_for(codes: tuple[str, ...]) -> str:
-            expressions = ", ".join(
-                f"max(case when {q(METRIC_CODE)} = 'flow.{code}' "
-                f"then cast({q(METRIC_VALUE)} as real) end)"
-                for code in codes
-            )
-            return f"coalesce({expressions})"
-
-        columns = FLOW_OVERVIEW_COLUMNS
-        values = [value_for(codes) for _, codes in FLOW_STORAGE_FIELDS]
-        assignments = ", ".join(
-            f"{q(column)} = excluded.{q(column)}" for column in columns[2:]
-        )
-        conn.execute(
-            f"""
-            insert into store_daily_flow_overviews (
-                {", ".join(q(column) for column in columns)}
-            )
-            select {q(STORE_ID)}, {q(BUSINESS_DAY)}, {", ".join(values)}
-            from store_daily_metrics
-            where {q(METRIC_SCOPE)} = 'self'
-              and {q(METRIC_CODE)} like 'flow.%'
-            group by {q(STORE_ID)}, {q(BUSINESS_DAY)}
-            on conflict({q(STORE_ID)}, {q(BUSINESS_DAY)}) do update set
-                {assignments}
-            """
-        )
+        """No-op: legacy flow metrics table has been dropped."""
+        pass
 
     @staticmethod
     def _refresh_daily_overviews_from_metrics(conn: sqlite3.Connection) -> None:

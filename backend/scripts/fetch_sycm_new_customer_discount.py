@@ -19,6 +19,7 @@ from app.integrations.tmall_session import (  # noqa: E402
     add_session_source_arguments,
     resolve_new_customer_discount_runtime_context,
 )
+from app.integrations.session.sycm import fetch_sycm_browser_json, sycm_browser_fallback_port  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ def fetch_sycm_new_customer_discount(
     cookie: str,
     token: str = "",
     timeout: int = 30,
+    browser_port: int | None = None,
 ) -> FetchResult:
     params = {
         "dateType": "day",
@@ -84,6 +86,16 @@ def fetch_sycm_new_customer_discount(
         status = exc.code
 
     try:
+        json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        if browser_port is not None:
+            try:
+                status, body = fetch_sycm_browser_json(browser_port, request.full_url, timeout=timeout)
+            except RuntimeError:
+                output.write_bytes(body)
+                raise
+
+    try:
         payload = json.loads(body.decode("utf-8"))
         output_body = json.dumps(
             _scrub_sensitive(payload), ensure_ascii=False, separators=(",", ":")
@@ -123,6 +135,7 @@ def main() -> int:
         output=args.output,
         cookie=runtime.session.cookie_header,
         token=runtime.token,
+        browser_port=sycm_browser_fallback_port(args.session_source, args.browser_port),
     )
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
     return 0 if result.ok else 1

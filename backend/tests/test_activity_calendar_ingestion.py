@@ -18,6 +18,7 @@ from app.core.local_database import ACTIVITY_CALENDAR_COLUMNS  # noqa: E402
 from app.warehouse.store import WarehouseStore  # noqa: E402
 from app.warehouse.sycm_activity_calendar import parse_payload  # noqa: E402
 from app.modules.collection.registry import COLLECTION_DATASET_BY_KEY  # noqa: E402
+from app.modules.collection.service import CollectionService  # noqa: E402
 from scripts.backfill_sycm_activity_calendar import _years_for_args  # noqa: E402
 
 
@@ -160,6 +161,15 @@ class ActivityCalendarIngestionTests(unittest.TestCase):
                     """
                 ).fetchone()
                 self.assertIsNone(raw_table)
+
+            service = CollectionService(database_path)
+            with closing(service.database.connect()) as conn:
+                coverage = service._table_coverage_for_dataset(
+                    conn, COLLECTION_DATASET_BY_KEY["sycm_activity_calendar"],
+                    "store_activity_calendar_events", date(2026, 9, 23),
+                )
+            self.assertEqual(coverage.row_count, 2)
+            self.assertTrue(coverage.present)
 
     def test_ingestion_replaces_only_the_requested_year(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

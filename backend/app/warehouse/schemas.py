@@ -63,20 +63,6 @@ class StoreDailyOverview(BaseModel):
     logistics_arrival_hours: Decimal = Decimal("0")
 
 
-class StoreDailyFlowOverviewMetric(BaseModel):
-    label: str
-    metric_code: str | None = None
-    value: Decimal | None = None
-    unit: str
-    confirmation_status: str
-
-
-class StoreDailyFlowOverview(BaseModel):
-    store_id: int
-    business_day: date
-    metrics: list[StoreDailyFlowOverviewMetric]
-
-
 class StoreActivityCalendarEvent(BaseModel):
     store_id: int
     business_day: date

@@ -85,6 +85,8 @@ class AgentPlan:
         query instead of automatically asking the operator to recollect data.
         """
         traffic = _comparison_result(results, "traffic_sources")
+        if self.name == "promotion-efficiency-diagnosis":
+            return _promotion_drilldown_repairs(self, results)
         if traffic is None:
             return self.fallback_calls
         if traffic.status != "no_data" and _comparison_rows(traffic, "source"):
@@ -108,7 +110,17 @@ def build_agent_plan(
     Each accepted intent gets a separate evidence contract, so adding a new
     agent behaviour does not alter the execution of an existing Skill.
     """
-    days = _comparison_days(question)
+    promotion_question = _is_promotion_efficiency_question(question)
+    explicit_days = _comparison_days(question)
+    days = explicit_days
+    # Promotion questions are useful even when the operator did not phrase
+    # them as a comparison.  Use the selected page range when it is explicit;
+    # otherwise inspect a bounded seven-day window.  The comparison remains
+    # adjacent and equal-length, so missing days cannot silently become zero.
+    if days is None and promotion_question and start_date and end_date:
+        days = (end_date - start_date).days + 1
+    if days is None and promotion_question:
+        days = 7
     if days is None:
         return None
     anchor = end_date or inherited_end_date or available_end_date
@@ -116,7 +128,13 @@ def build_agent_plan(
         return None
     # If callers supplied a range, “最近 N 天” means the final N business
     # days inside that range, never a range relative to the machine clock.
-    current_start = anchor - timedelta(days=days - 1)
+    current_start = (
+        start_date
+        if promotion_question and explicit_days is None and start_date and end_date
+        else anchor - timedelta(days=days - 1)
+    )
+    if current_start > anchor:
+        return None
     if start_date and current_start < start_date:
         return None
     previous_end = current_start - timedelta(days=1)
@@ -126,6 +144,8 @@ def build_agent_plan(
         return _channel_growth_plan(days, window)
     if _is_recent_sales_growth_question(question):
         return _sales_growth_plan(days, window)
+    if promotion_question:
+        return _promotion_efficiency_plan(days, window)
     return None
 
 
@@ -235,6 +255,7 @@ def _sales_growth_plan(days: int, window: tuple[date, date, date, date]) -> Agen
             "推广归因成交和 ROI 仅用于解释投放相关变化，不当作已经证明的因果增量。",
         ),
     )
+
     compare_base = {"start_date": current_start, "end_date": current_end, "limit": 100}
     return AgentPlan(
         name="recent-sales-growth-diagnosis",
@@ -291,10 +312,177 @@ def _sales_growth_plan(days: int, window: tuple[date, date, date, date]) -> Agen
     )
 
 
+def _promotion_efficiency_plan(days: int, window: tuple[date, date, date, date]) -> AgentPlan:
+    current_start, current_end, previous_start, previous_end = window
+    intent = AnalysisIntent(
+        name="promotion-efficiency-diagnosis",
+        goal=(
+            f"审计 {current_start.isoformat()} 至 {current_end.isoformat()} 的推广全量账户，"
+            f"并与紧邻前 {days} 天比较，按场景→计划→单元→人群/关键词/商品定位低效与扩量候选"
+        ),
+        comparison_dimension="推广场景、计划、单元、人群、关键词、商品、内容",
+        ranking_measure="花费覆盖下的归因成交、ROI、点击转化率和新客占比",
+        current_start=current_start,
+        current_end=current_end,
+        previous_start=previous_start,
+        previous_end=previous_end,
+        hypotheses=(
+            "先用推广计划全量聚合确认账户总盘，再按花费和效率筛选下钻对象。",
+            "高点击低成交优先检查商品承接和流量匹配，不用继续加预算掩盖转化问题。",
+            "高 ROI 计划只能进入小额阶梯测试；没有实验或对照时不称为因果增量或利润。",
+            "缺失日期、缺失层级和平台确认无数据必须分开，不把缺失当作 0。",
+        ),
+    )
+    current_args = {"start_date": current_start, "end_date": current_end}
+    compare_args = {**current_args, "limit": 100}
+    return AgentPlan(
+        name="promotion-efficiency-diagnosis",
+        primary_skill="promotion-roi",
+        supporting_skills=("promotion-budget-planning", "product-diagnosis", "data-quality-audit"),
+        intent=intent,
+        calls=(
+            SkillToolStep(
+                tool="data.coverage",
+                arguments={
+                    "datasets": [
+                        "store_overview", "promotion_campaigns", "promotion_adgroups",
+                        "promotion_crowds", "promotion_keywords", "promotion_products", "promotion_contents",
+                    ],
+                    "start_date": previous_start,
+                    "end_date": current_end,
+                },
+                description="先校验总盘和推广场景、计划、单元、人群、关键词、商品、内容的日期覆盖",
+            ),
+            SkillToolStep(
+                tool="promotions.get_efficiency",
+                arguments=current_args,
+                description="读取全量推广账户和场景聚合，建立花费、归因成交、ROI、点击和新客总盘",
+            ),
+            SkillToolStep(
+                tool="data.compare_periods",
+                arguments={
+                    **compare_args,
+                    "dataset": "promotion_campaigns",
+                    "dimensions": ["scene"],
+                    "measures": ["spend", "gmv", "buyers", "clicks", "roi", "direct_roi", "click_conversion_rate", "new_buyer_share"],
+                    "order_by": ["-spend"],
+                },
+                description="比较本期与前期推广场景的规模、归因效率和点击转化变化",
+            ),
+            SkillToolStep(
+                tool="promotions.get_drilldown",
+                arguments={**current_args, "level": "campaign", "order_by": "-spend", "page": 1, "page_size": 100},
+                description="按计划层保留全量花费排序结果，供质量门选择低效和高效候选",
+            ),
+            SkillToolStep(
+                tool="data.query",
+                arguments={
+                    **current_args,
+                    "dataset": "promotion_contents",
+                    "dimensions": ["scene", "campaign_id", "campaign_name", "content_id", "content_name", "content_type"],
+                    "measures": ["impressions", "clicks", "spend", "gmv", "orders", "roi", "ctr", "cpc"],
+                    "order_by": ["-spend"],
+                    "limit": 200,
+                },
+                description="补充推广内容层证据，检查内容点击与成交承接",
+            ),
+        ),
+        completion_rule=(
+            "推广覆盖至少包含一个完整账户窗口；全量账户聚合和计划层结果必须返回，"
+            "并对主要低效计划继续取得单元、人群、关键词或商品层证据后，才输出 P0/P1 动作。"
+        ),
+    )
+
+
+def _promotion_drilldown_repairs(plan: AgentPlan, results: list[MCPEnvelope]) -> tuple[SkillToolStep, ...]:
+    """Select the next bounded drilldown from observed spend and efficiency."""
+    campaign_result = next(
+        (item for item in results if item.tool == "promotions.get_drilldown" and item.data.get("level") == "campaign"),
+        None,
+    )
+    efficiency = next((item for item in results if item.tool == "promotions.get_efficiency"), None)
+    rows = list((campaign_result.data.get("rows") if campaign_result else None) or [])
+    if not rows and efficiency is not None:
+        rows = list(efficiency.data.get("campaigns") or [])
+    if not rows:
+        return ()
+
+    def spend(row: dict[str, Any]) -> float:
+        return _number(row.get("spend")) or 0.0
+
+    def roi(row: dict[str, Any]) -> float:
+        return _number(row.get("roi")) or 0.0
+
+    low = [row for row in rows if spend(row) > 0 and (roi(row) < 1.5 or (_number(row.get("paid_amount")) or 0) == 0)]
+    selected = sorted(low or rows, key=spend, reverse=True)[:2]
+    existing_child_results = [
+        item for item in results
+        if item.tool == "promotions.get_drilldown" and item.data.get("level") in {"adgroup", "product", "audience", "keyword"}
+    ]
+    calls: list[SkillToolStep] = []
+    if not existing_child_results:
+        for row in selected:
+            campaign_id = str(row.get("campaign_id") or row.get("dimension_id") or "").strip()
+            if not campaign_id:
+                continue
+            for level, label in (("adgroup", "单元"), ("product", "商品")):
+                calls.append(SkillToolStep(
+                    tool="promotions.get_drilldown",
+                    arguments={
+                        "start_date": plan.intent.current_start,
+                        "end_date": plan.intent.current_end,
+                        "level": level,
+                        "campaign_id": campaign_id,
+                        "order_by": "-spend",
+                        "page": 1,
+                        "page_size": 100,
+                    },
+                    description=f"按低效/高影响计划 {campaign_id} 下钻{label}层，寻找可执行问题对象",
+                ))
+        return tuple(calls)
+
+    # Audience and keyword rows are children of an adgroup rather than a
+    # campaign.  Observe the first-stage adgroup results and only then select
+    # the highest-impact units for the second evidence round.
+    adgroup_rows = [
+        row for item in existing_child_results if item.data.get("level") == "adgroup"
+        for row in (item.data.get("rows") or [])
+    ]
+    low_adgroups = [row for row in adgroup_rows if spend(row) > 0 and (roi(row) < 1.5 or (_number(row.get("paid_amount")) or 0) == 0)]
+    selected_adgroups = sorted(low_adgroups or adgroup_rows, key=spend, reverse=True)[:2]
+    existing_leaf_keys = {
+        (str(item.data.get("level")), str((item.context.filters or {}).get("adgroup_id") or ""))
+        for item in existing_child_results if item.data.get("level") in {"audience", "keyword"}
+    }
+    for row in selected_adgroups:
+        adgroup_id = str(row.get("dimension_id") or row.get("adgroup_id") or "").strip()
+        if not adgroup_id:
+            continue
+        for level, label in (("audience", "人群"), ("keyword", "关键词")):
+            if (level, adgroup_id) in existing_leaf_keys:
+                continue
+            calls.append(SkillToolStep(
+                tool="promotions.get_drilldown",
+                arguments={
+                    "start_date": plan.intent.current_start,
+                    "end_date": plan.intent.current_end,
+                    "level": level,
+                    "adgroup_id": adgroup_id,
+                    "order_by": "-spend",
+                    "page": 1,
+                    "page_size": 100,
+                },
+                description=f"根据第一轮结果继续下钻单元 {adgroup_id} 的{label}层",
+            ))
+    return tuple(calls)
+
+
 def diagnose_agent_plan(plan: AgentPlan, results: list[MCPEnvelope]) -> Diagnosis:
     """Synthesize an answer from exactly the evidence required by the plan."""
     if plan.name == "recent-sales-growth-diagnosis":
         return _sales_growth_diagnosis(plan, results)
+    if plan.name == "promotion-efficiency-diagnosis":
+        return _promotion_efficiency_diagnosis(plan, results)
     traffic = _comparison_result(results, "traffic_sources")
     overview = _comparison_result(results, "store_overview")
     promotions = _comparison_result(results, "promotion_campaigns")
@@ -445,6 +633,251 @@ def diagnose_agent_plan(plan: AgentPlan, results: list[MCPEnvelope]) -> Diagnosi
         next_questions=[f"下钻 {lead['来源']} 的二级和三级来源", "比较增长来源承接的商品与退款", "查看增长窗口是否处于活动期"],
     )
 
+
+def _promotion_efficiency_diagnosis(plan: AgentPlan, results: list[MCPEnvelope]) -> Diagnosis:
+    efficiency = next((item for item in results if item.tool == "promotions.get_efficiency"), None)
+    comparison = _comparison_result(results, "promotion_campaigns")
+    campaign_drill = next(
+        (item for item in results if item.tool == "promotions.get_drilldown" and item.data.get("level") == "campaign"),
+        None,
+    )
+    coverage = _merged_coverage(results, plan)
+    if efficiency is None or efficiency.status == "no_data":
+        return _incomplete_diagnosis(
+            plan,
+            coverage,
+            "推广账户总盘没有返回可用计划数据，暂时不能判断该降预算、止损还是扩量。",
+            "先确认推广计划日报已采集且覆盖当前窗口，再重新执行推广诊断。",
+        )
+
+    summary = efficiency.data.get("summary") or {}
+    spend = _number(summary.get("spend")) or 0.0
+    paid_amount = _number(summary.get("paid_amount") or summary.get("gmv")) or 0.0
+    roi = _number(summary.get("roi"))
+    clicks = _number(summary.get("clicks")) or 0.0
+    buyers = _number(summary.get("buyers")) or 0.0
+    click_cvr = buyers / clicks * 100 if clicks else None
+    campaigns = list((campaign_drill.data.get("rows") if campaign_drill else None) or efficiency.data.get("campaigns") or [])
+    low_campaigns = [
+        row for row in campaigns
+        if (_number(row.get("spend")) or 0) > 0
+        and ((_number(row.get("roi")) or 0) < 1.5 or (_number(row.get("paid_amount")) or 0) == 0)
+    ]
+    low_campaigns.sort(key=lambda row: _number(row.get("spend")) or 0, reverse=True)
+    low_spend = sum(_number(row.get("spend")) or 0 for row in low_campaigns)
+    low_share = low_spend / spend * 100 if spend else None
+    no_gmv = [
+        row for row in campaigns
+        if (_number(row.get("spend")) or 0) > 0 and (_number(row.get("paid_amount")) or 0) == 0
+    ]
+    scale_candidates = [
+        row for row in campaigns
+        if (_number(row.get("spend")) or 0) > 0
+        and (_number(row.get("roi")) or 0) >= 3
+        and (_number(row.get("clicks")) or 0) > 0
+    ]
+    scale_candidates.sort(key=lambda row: _number(row.get("spend")) or 0, reverse=True)
+    drill_levels = {
+        item.data.get("level"): item for item in results
+        if item.tool == "promotions.get_drilldown" and item.data.get("level")
+    }
+    layer_counts = {
+        level: int((item.data.get("total") or 0))
+        for level, item in drill_levels.items()
+        if level != "campaign"
+    }
+    content_result = next((item for item in results if item.tool == "data.query" and item.data.get("dataset") == "promotion_contents"), None)
+    content_rows = list((content_result.data.get("rows") if content_result else None) or [])
+    findings: list[DiagnosisFinding] = [
+        DiagnosisFinding(
+            level="warning" if roi is not None and roi < 1 else "info",
+            title="推广账户总盘已先于计划下钻确认",
+            detail=(
+                f"本期花费 {spend:,.0f} 元，平台归因成交 {paid_amount:,.0f} 元，整体 ROI "
+                f"{_number_text(roi)}，点击 {clicks:,.0f}，成交买家 {buyers:,.0f}"
+                f"，点击转化率 {_number_text(click_cvr)}%。"
+                " ROI/归因成交是投放效率口径，不等于利润或已经证明的增量。"
+            ),
+            metric_ids=["promotion_spend", "promotion_roi", "click_conversion_rate"],
+            evidence=["promotions.get_efficiency"],
+            confidence="high" if efficiency.status == "ok" and not coverage.missing_dates else "medium",
+        )
+    ]
+    if low_campaigns:
+        top = low_campaigns[:3]
+        names = "、".join(str(row.get("dimension_name") or row.get("campaign_name") or row.get("dimension_id") or "未命名计划") for row in top)
+        findings.append(DiagnosisFinding(
+            level="critical" if low_share is not None and low_share >= 30 else "warning",
+            title="高花费低效率计划需要先止损复核",
+            detail=(
+                f"识别 {len(low_campaigns)} 个 ROI<1.5 或无归因成交的计划，预计花费 {low_spend:,.0f} 元"
+                f"（账户花费占比 {_number_text(low_share)}%）。优先对象：{names}。"
+                " 该判断只说明归因成交未覆盖/接近覆盖花费，不直接等于亏损。"
+            ),
+            metric_ids=["promotion_spend", "promotion_roi"],
+            evidence=["promotions.get_drilldown:campaign", *[f"promotions.get_drilldown:{level}" for level in layer_counts]],
+            confidence="high" if campaign_drill and campaign_drill.status == "ok" else "medium",
+        ))
+    if no_gmv:
+        findings.append(DiagnosisFinding(
+            level="warning",
+            title="存在点击或花费但无归因成交的计划",
+            detail=f"共有 {len(no_gmv)} 个计划有花费但归因成交为 0；先检查关键词/人群匹配、落地商品、价格与库存承接。",
+            metric_ids=["clicks", "gmv", "click_conversion_rate"],
+            evidence=["promotions.get_drilldown:campaign"],
+            confidence="medium",
+        ))
+    if scale_candidates:
+        candidate = scale_candidates[0]
+        candidate_name = str(candidate.get("dimension_name") or candidate.get("campaign_name") or candidate.get("dimension_id") or "未命名计划")
+        findings.append(DiagnosisFinding(
+            level="positive",
+            title="存在可进入小额阶梯测试的高效率候选",
+            detail=(
+                f"{candidate_name} 当前花费 {_number(candidate.get('spend')) or 0:,.0f} 元，ROI {_number_text(_number(candidate.get('roi')))}，"
+                "只能作为扩量假设；应先做 10%~20% 预算阶梯，观察边际 ROI、点击转化率和新客质量。"
+            ),
+            metric_ids=["promotion_roi", "promotion_spend"],
+            evidence=["promotions.get_drilldown:campaign"],
+            confidence="medium",
+        ))
+    if comparison is not None and comparison.data.get("comparable"):
+        findings.append(DiagnosisFinding(
+            level="info",
+            title="推广场景趋势已作为反证检查",
+            detail="场景层本期与前期覆盖完整，可继续区分是花费扩张、点击承接还是成交效率变化；场景归因与店铺总盘不相加。",
+            metric_ids=["promotion_spend", "promotion_roi"],
+            evidence=["data.compare_periods:promotion_campaigns"],
+            confidence="high",
+        ))
+    elif comparison is not None:
+        findings.append(DiagnosisFinding(
+            level="info",
+            title="推广场景趋势不可严格比较",
+            detail="本期或前期存在缺失日期/数据集不完整，趋势只保留当前窗口描述，不把缺失日期当作 0。",
+            metric_ids=["promotion_spend", "promotion_roi"],
+            evidence=["data.compare_periods:promotion_campaigns"],
+            confidence="low",
+        ))
+
+    actions: list[RecommendedAction] = []
+    if low_campaigns:
+        first = low_campaigns[0]
+        first_id = str(first.get("campaign_id") or first.get("dimension_id") or "")
+        first_name = str(first.get("dimension_name") or first.get("campaign_name") or first_id or "低效计划")
+        actions.append(RecommendedAction(
+            priority="P0",
+            title=f"先复核并限额 {first_name}",
+            detail="沿计划→单元→关键词/人群→商品检查花费集中对象；在未确认承接和归因窗口前，暂停自动加预算，必要时先降低预算或暂停无成交对象。",
+            owner="推广运营",
+            validation="未来 1-3 天该计划的花费、点击转化率、直接/间接成交和退款表现改善，且低效花费占比下降",
+            observation_window="1-3天",
+            expected_impact="降低无效花费暴露，保留可复盘的变更前基线。",
+            object_type="campaign",
+            object_id=first_id,
+            problem="高花费低归因效率",
+            verify_metric="ROI、点击转化率、无成交花费占比",
+            stop_condition="花费继续增长但点击转化率和归因成交无改善",
+            confidence="high" if campaign_drill else "medium",
+        ))
+    if no_gmv:
+        actions.append(RecommendedAction(
+            priority="P1",
+            title="处理点击有量但无成交的承接断点",
+            detail="优先检查人群/关键词与商品的相关性、详情首屏、活动价、库存和落地页；不要只通过提高出价放大该断点。",
+            owner="商品运营",
+            validation="点击转化率、加购率和商品库存承接在连续 3 天内改善",
+            observation_window="3-7天",
+            expected_impact="把问题从投放流量规模转化为可验证的商品承接改善。",
+            verify_metric="点击转化率、加购率、支付买家",
+            stop_condition="点击增加而加购/支付继续不变或退款上升",
+        ))
+    if scale_candidates:
+        candidate = scale_candidates[0]
+        actions.append(RecommendedAction(
+            priority="P2",
+            title="对高效率计划做小额阶梯测试",
+            detail="仅在同口径窗口完整时，将预算提高 10%~20%，设置边际 ROI 和点击转化率止损线；测试通过再继续扩量。",
+            owner="推广运营",
+            validation="测试组相对基线的边际 ROI 不明显下降，新增花费和归因成交同步可解释",
+            observation_window="3-7天",
+            expected_impact="验证可扩量性，而不是把历史 ROI 直接外推为利润。",
+            object_type="campaign",
+            object_id=str(candidate.get("campaign_id") or candidate.get("dimension_id") or ""),
+            problem="高效率但扩量假设未验证",
+            verify_metric="边际 ROI、点击转化率、新客占比",
+            stop_condition="边际 ROI 低于基线或点击转化率明显恶化",
+            confidence="medium",
+        ))
+    if not actions:
+        actions.append(RecommendedAction(
+            priority="P1",
+            title="保持当前预算并补齐层级证据",
+            detail="当前没有足够的高影响低效对象或扩量候选；先补齐计划下的单元、人群、关键词和商品层数据，再做动作。",
+            owner="数据运营",
+            validation="推广覆盖完整，且至少有一个计划层及其下钻层返回可比较结果",
+            observation_window="完成后立即复跑",
+            expected_impact="避免在样本不足时直接改预算。",
+            confidence="low",
+        ))
+
+    artifact_rows = [{
+        "指标": "账户花费", "当前值": round(spend, 2), "归因成交": round(paid_amount, 2), "ROI": roi,
+        "点击": round(clicks, 2), "成交买家": round(buyers, 2), "点击转化率%": click_cvr,
+        "覆盖状态": "完整" if not coverage.missing_dates and not coverage.partial_datasets else "部分覆盖",
+    }]
+    campaign_rows = []
+    for row in campaigns[:30]:
+        campaign_rows.append({
+            "计划": row.get("dimension_name") or row.get("campaign_name") or row.get("dimension_id") or "未命名计划",
+            "计划ID": row.get("campaign_id") or row.get("dimension_id") or "",
+            "花费": _number(row.get("spend")),
+            "归因成交": _number(row.get("paid_amount")),
+            "ROI": _number(row.get("roi")),
+            "点击": _number(row.get("clicks")),
+            "成交买家": _number(row.get("buyers")),
+            "问题标签": "高花费低效率" if row in low_campaigns else "",
+        })
+    if content_rows:
+        content_rows = content_rows[:30]
+    artifacts = [
+        ArtifactSpec(type="metric_table", title="推广账户总盘", rows=artifact_rows),
+        ArtifactSpec(type="matrix", title="推广计划全量效率", rows=campaign_rows),
+        ArtifactSpec(type="metric_table", title="推广层级证据状态", rows=[
+            {"层级": level, "返回行数": count, "用途": "定位可执行对象"} for level, count in sorted(layer_counts.items())
+        ] or [{"层级": "计划", "返回行数": len(campaigns), "用途": "计划层总盘"}]),
+    ]
+    if content_rows:
+        artifacts.append(ArtifactSpec(type="matrix", title="推广内容承接", rows=content_rows))
+    return Diagnosis(
+        headline=("推广账户存在高花费低效率暴露" if low_campaigns else "推广账户总盘与层级证据已完成"),
+        summary=(
+            f"{plan.intent.current_start.isoformat()} 至 {plan.intent.current_end.isoformat()}：花费 {spend:,.0f} 元，"
+            f"平台归因成交 {paid_amount:,.0f} 元，ROI {_number_text(roi)}。"
+            "结论按全量账户分母计算，Top 计划只用于定位，不代替总计。"
+        ),
+        findings=findings,
+        actions=actions,
+        artifacts=artifacts,
+        analysis_plan=plan.as_dict(),
+        coverage=coverage,
+        confidence="high" if efficiency.status == "ok" and not coverage.missing_dates else "medium" if efficiency.status == "ok" else "low",
+        assumptions=[
+            "ROI = 平台归因成交 ÷ 推广花费；不等于利润率。",
+            "推广场景、计划、单元、人群、关键词、商品和内容存在层级包含关系，不把各层金额相加。",
+            "Top N 仅用于展示和下钻选择，账户总盘使用全量计划聚合。",
+        ],
+        missing_inputs=["完整商品成本、平台费、优惠补贴和履约成本"],
+        evidence_refs=[item.tool + (f":{item.data.get('dataset')}" if item.data.get("dataset") else "") for item in results],
+        metric_definitions={
+            "整体 ROI": "推广计划全量平台归因成交金额 ÷ 推广花费",
+            "点击转化率": "成交买家数 ÷ 点击量",
+            "新客占比": "成交新客数 ÷ 成交买家数（有字段时）",
+        },
+        denominator_notes=["账户 ROI、低效花费占比和计划排序都使用全量推广计划作为分母。", "缺失日期不按 0 参与趋势和效率判断。"],
+        causal_boundary="本分析只识别平台归因贡献与投放效率，不能在没有实验、可信对照或平台增量报告时声称广告带来了因果增量，也不能用 ROI 推导利润。",
+        next_questions=["下钻低效计划的关键词和人群", "检查高点击低成交商品的详情和库存承接", "对高效率计划做 10%~20% 预算阶梯测试并复盘 T+7"],
+    )
 
 def _sales_growth_diagnosis(plan: AgentPlan, results: list[MCPEnvelope]) -> Diagnosis:
     """Explain a recent sales change without mixing it with a long period."""
@@ -608,7 +1041,12 @@ def _sales_growth_diagnosis(plan: AgentPlan, results: list[MCPEnvelope]) -> Diag
 
 
 def _incomplete_diagnosis(plan: AgentPlan, coverage: CoverageSummary, detail: str, reason: str) -> Diagnosis:
-    subject = "销售增长诊断" if plan.name == "recent-sales-growth-diagnosis" else "一级流量来源"
+    if plan.name == "recent-sales-growth-diagnosis":
+        subject = "销售增长诊断"
+    elif plan.name == "promotion-efficiency-diagnosis":
+        subject = "推广效率诊断"
+    else:
+        subject = "一级流量来源"
     return Diagnosis(
         headline=f"{subject}尚不能形成可靠结论",
         summary=detail,
@@ -631,8 +1069,37 @@ def _incomplete_diagnosis(plan: AgentPlan, coverage: CoverageSummary, detail: st
         coverage=coverage,
         confidence="low",
         assumptions=["缺失日期不按 0 参与渠道增长计算。"],
-        causal_boundary="未取得可比较的一级来源记录时，不输出渠道增长归因结论。",
+        causal_boundary=(
+            "未取得可比较的推广证据时，不输出投放效率或预算动作结论。"
+            if plan.name == "promotion-efficiency-diagnosis"
+            else "未取得可比较的一级来源记录时，不输出渠道增长归因结论。"
+        ),
     )
+
+
+def _is_promotion_efficiency_question(question: str) -> bool:
+    lowered = question.casefold()
+    if _is_budget_planning_question(question):
+        # Keep the existing budget-planning skill's target/constraint
+        # contract.  Efficiency diagnosis can still recommend a test, but it
+        # must not replace an explicit budget-allocation request.
+        return False
+    promotion_terms = ("推广", "投放", "广告", "roi", "投产", "花费", "计划", "人群", "关键词", "预算")
+    intent_terms = ("分析", "诊断", "效率", "低效", "高花费", "投产", "应该", "哪些", "怎么", "如何", "为什么", "复盘", "优化", "表现", "扩量", "降预算")
+    if not any(token in lowered for token in promotion_terms) or not any(token in lowered for token in intent_terms):
+        return False
+    # A store-wide question may mention promotion as one of many domains. It
+    # belongs to the overview orchestrator unless promotion is the explicit
+    # subject of the request.
+    broad = any(token in lowered for token in ("店铺", "全店", "整体", "经营", "总盘"))
+    other_domains = sum(token in lowered for token in ("流量", "商品", "客服", "库存", "评价", "客户", "直播"))
+    explicit_focus = any(token in lowered for token in ("推广效率", "投放效率", "计划效率", "低效计划", "推广roi", "推广 roi", "投放roi", "投放 roi"))
+    return not (broad and other_domains >= 2 and not explicit_focus)
+
+
+def _is_budget_planning_question(question: str) -> bool:
+    lowered = question.casefold().strip()
+    return any(token in lowered for token in ("预算怎么分", "预算怎么拆", "预算分配", "预算规划", "预算节奏", "目标roi", "目标投产", "总预算", "值得加预算", "值得投", "加预算"))
 
 
 def _is_channel_growth_question(question: str) -> bool:
@@ -748,11 +1215,31 @@ def _promotion_row(current: dict[str, Any], previous: dict[str, Any]) -> dict[st
 
 
 def _merged_coverage(results: list[MCPEnvelope], plan: AgentPlan) -> CoverageSummary:
-    preferred = (
-        _comparison_result(results, "store_overview")
-        if plan.name == "recent-sales-growth-diagnosis"
-        else _comparison_result(results, "traffic_sources")
-    )
+    if plan.name == "recent-sales-growth-diagnosis":
+        preferred = _comparison_result(results, "store_overview")
+    elif plan.name == "promotion-efficiency-diagnosis":
+        audit = next((item for item in results if item.tool == "data.coverage"), None)
+        efficiency = next((item for item in results if item.tool == "promotions.get_efficiency"), None)
+        comparison = _comparison_result(results, "promotion_campaigns")
+        candidates = [item for item in (audit, efficiency, comparison) if item is not None]
+        if candidates:
+            expected_days = (plan.intent.current_end - plan.intent.current_start).days + 1
+            missing_dates = sorted({day for item in candidates for day in item.coverage.missing_dates})
+            preferred_coverage = CoverageSummary(
+                expected_days=expected_days,
+                covered_days=min((item.coverage.covered_days for item in candidates), default=0),
+                missing_dates=missing_dates,
+                missing_datasets=list(dict.fromkeys(name for item in candidates for name in item.coverage.missing_datasets)),
+                partial_datasets=list(dict.fromkeys(name for item in candidates for name in item.coverage.partial_datasets)),
+                failed_datasets=list(dict.fromkeys(name for item in candidates for name in item.coverage.failed_datasets)),
+                no_data_datasets=list(dict.fromkeys(name for item in candidates for name in item.coverage.no_data_datasets)),
+                no_data_dates=list(dict.fromkeys(day for item in candidates for day in item.coverage.no_data_dates)),
+                latest_data_date=max((item.coverage.latest_data_date for item in candidates if item.coverage.latest_data_date), default=None),
+            )
+            return preferred_coverage
+        preferred = None
+    else:
+        preferred = _comparison_result(results, "traffic_sources")
     if preferred is not None:
         return preferred.coverage
     return CoverageSummary(

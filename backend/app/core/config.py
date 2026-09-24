@@ -65,8 +65,6 @@ class Settings:
     default_store_id: int | None
     capture_database_path: str
     capture_source_directory: str
-    contract_report_path: str
-    daily_dry_run_directory: str
     auth_enabled: bool
     auth_session_days: int
     auth_cookie_secure: bool
@@ -134,14 +132,6 @@ settings = Settings(
     capture_source_directory=os.getenv(
         "ECHO_CAPTURE_SOURCE_DIRECTORY",
         r"C:\Users\Moli\AppData\Roaming\Reqable\capture",
-    ),
-    contract_report_path=_project_path_env(
-        "ECHO_CONTRACT_REPORT_PATH",
-        "artifacts/local/reqable_api_request_pairs.json",
-    ),
-    daily_dry_run_directory=_project_path_env(
-        "ECHO_DAILY_DRY_RUN_DIRECTORY",
-        "artifacts/local",
     ),
     # Authentication is enabled by default. It can still be disabled
     # explicitly for isolated tests or one-off local diagnostics.

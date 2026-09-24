@@ -17,6 +17,7 @@ from app.integrations.tmall_session import (  # noqa: E402
 )
 from app.modules.imports.crawl_run_store import CrawlRunStore  # noqa: E402
 from app.warehouse.store import WarehouseStore  # noqa: E402
+from app.warehouse.utry_overviews import UtryPayloadError  # noqa: E402
 from scripts.fetch_utry_report import UTRY_REPORT_CONFIG, fetch_utry_report  # noqa: E402
 
 
@@ -85,6 +86,7 @@ def main() -> int:
             try:
                 if runtime is None:
                     raise RuntimeError("U先 runtime session is unavailable")
+                no_data_day = False
                 counts: list[int] = []
                 for report_type in ("sample", "repurchase"):
                     report_id = UTRY_REPORT_CONFIG[report_type]["report_id"]
@@ -103,17 +105,30 @@ def main() -> int:
                         raise RuntimeError(
                             f"U先 {report_type} fetch failed: HTTP {status}, code={code}, message={message or 'unknown'}"
                         )
-                    if report_type == "sample":
-                        result = warehouse.ingest_utry_sample_overview(
-                            output, day, args.store_name, args.platform_store_id, http_status=status
-                        )
-                    else:
-                        result = warehouse.ingest_utry_repurchase_overview(
-                            output, day, args.store_name, args.platform_store_id, http_status=status
-                        )
-                    counts.append(rows)
-                    _append_log(log_file, {"day": day.isoformat(), "report_type": report_type, "status": "ingested", "rows": rows, "metric_count": result.metric_count})
-                if sum(counts) == 0:
+                    try:
+                        if report_type == "sample":
+                            result = warehouse.ingest_utry_sample_overview(
+                                output, day, args.store_name, args.platform_store_id, http_status=status
+                            )
+                        else:
+                            result = warehouse.ingest_utry_repurchase_overview(
+                                output, day, args.store_name, args.platform_store_id, http_status=status
+                            )
+                    except UtryPayloadError as payload_exc:
+                        # ``data.value is null`` → the platform explicitly says
+                        # "no campaign data for this day".  Record no_data for
+                        # this report type and continue; the day-level
+                        # bookkeeping at the bottom of the loop decides the
+                        # overall status.
+                        if payload_exc.no_data:
+                            counts.append(0)
+                            no_data_day = True
+                            _append_log(log_file, {"day": day.isoformat(), "report_type": report_type, "status": "no_data", "rows": 0, "metric_count": 0})
+                            continue
+                        raise
+                    counts.append(result.metric_count)
+                    _append_log(log_file, {"day": day.isoformat(), "report_type": report_type, "status": "ingested", "metric_count": result.metric_count})
+                if no_data_day or sum(counts) == 0:
                     summary["no_data"] += 1
                     runs.record_day(run_id=run_id, store_id=args.store_id, business_day=day, status="no_data", metric_count=0)
                     print(f"{day.isoformat()} no data")

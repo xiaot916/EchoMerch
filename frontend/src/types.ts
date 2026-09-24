@@ -22,6 +22,10 @@ export interface ProductMetric {
   page_views: number
   search_visitors: number
   promotion_spend: number
+  promotion_attributed_paid_amount: number
+  cps_paid_amount: number
+  cps_estimated_expense: number
+  cps_entry_visitors: number
   product_type: string
   series: string
   positioning: string
@@ -546,18 +550,18 @@ export interface PromotionSummaryMetric {
   direct_paid_amount: number
   indirect_paid_amount: number
   orders: number
-  buyers: number
+  buyers: number | null
   carts: number
   favorites: number
-  new_buyers: number
+  new_buyers: number | null
   member_paid_amount: number
   natural_paid_amount: number
   roi: number
   click_rate: number
   average_click_cost: number
-  click_conversion_rate: number
-  buyer_acquisition_cost: number
-  new_buyer_share: number
+  click_conversion_rate: number | null
+  buyer_acquisition_cost: number | null
+  new_buyer_share: number | null
 }
 
 export interface PromotionDailyMetric {
@@ -567,9 +571,9 @@ export interface PromotionDailyMetric {
   spend: number
   paid_amount: number
   orders: number
-  buyers: number
+  buyers: number | null
   carts: number
-  new_buyers: number
+  new_buyers: number | null
 }
 
 export interface PromotionDimensionMetric {
@@ -587,12 +591,15 @@ export interface PromotionDimensionMetric {
   direct_paid_amount: number
   indirect_paid_amount: number
   orders: number
-  buyers: number
+  buyers: number | null
   carts: number
   favorites: number
-  new_buyers: number
+  new_buyers: number | null
   member_paid_amount: number
   natural_paid_amount: number
+  buyer_metric_clicks: number
+  buyer_metric_spend: number
+  buyer_metric_days: number
 }
 
 export interface PromotionLayerCoverage {
@@ -601,6 +608,17 @@ export interface PromotionLayerCoverage {
   covered_days: number
   row_count: number
   entity_count: number
+}
+
+export interface PromotionDataQuality {
+  status: "complete" | "partial" | "empty"
+  expected_days: number
+  covered_days: number
+  valid_buyer_metric_days: number
+  missing_dates: string[]
+  partial_dates: string[]
+  unavailable_metrics: string[]
+  incomplete_layers: string[]
 }
 
 export interface PromotionWorkbenchResponse {
@@ -616,6 +634,7 @@ export interface PromotionWorkbenchResponse {
   items: PromotionDimensionMetric[]
   contents: PromotionDimensionMetric[]
   coverage: PromotionLayerCoverage[]
+  data_quality: PromotionDataQuality
 }
 
 export interface DataFreshness {
@@ -685,6 +704,23 @@ export interface AIRecommendedAction {
   confidence: "high" | "medium" | "low"
 }
 
+export interface AIAgentAnalysisPlan {
+  name: string
+  primary_skill: string
+  supporting_skills: string[]
+  intent: {
+    name: string
+    goal: string
+    comparison_dimension: string
+    ranking_measure: string
+    current_range: string[]
+    previous_range: string[]
+    hypotheses: string[]
+  }
+  steps: Array<{ tool: string; purpose: string; arguments: Record<string, unknown> }>
+  completion_rule: string
+}
+
 export interface AIAnalysisResponse {
   request_id: string
   conversation_id?: string | null
@@ -701,6 +737,7 @@ export interface AIAnalysisResponse {
     findings: AIDiagnosisFinding[]
     actions: AIRecommendedAction[]
     artifacts: Array<{ type: string; title: string; columns: Array<Record<string, string>>; rows: Array<Record<string, unknown>>; option: Record<string, unknown> }>
+    analysis_plan?: AIAgentAnalysisPlan | Record<string, never>
     analysis_scope: Record<string, unknown>
     coverage: {
       expected_days: number
@@ -791,11 +828,29 @@ export interface PeriodReportResponse {
     no_data_sections: string[]
     coverage_by_dataset?: Array<Record<string, any>>
     data_quality?: { status: string; missing_sections: string[]; no_data_sections: string[]; missing_dates: string[]; missing_datasets?: string[]; partial_datasets?: string[]; failed_datasets?: string[]; no_data_datasets?: string[]; no_data_dates?: string[]; latest_data_date: string | null }
+    comparison_data_quality?: { status?: string; missing_sections?: string[]; no_data_sections?: string[]; missing_dates?: string[]; missing_datasets?: string[]; partial_datasets?: string[]; failed_datasets?: string[]; no_data_datasets?: string[]; no_data_dates?: string[]; latest_data_date?: string | null }
+    comparison_coverage_by_dataset?: Array<Record<string, any>>
     decision_quality?: {
       overall: { confidence: "high" | "medium" | "low"; status: string; reason: string }
       modules: Array<{ key: string; label: string; confidence: "high" | "medium" | "low"; status: string; reason: string }>
     }
     daily_series?: Array<{ stat_date: string; paid_amount: number; visitors: number; buyers: number; conversion_rate: number; refund_amount?: number; refund_rate?: number; promotion_plan_spend?: number; promotion_attributed_paid_amount?: number }>
+    report_title?: string
+    comparison_label?: string
+    comparison_mode?: "previous_period" | "same_period_last_year" | "custom"
+    review_kpis?: Array<Record<string, any>>
+    monthly_trend?: Array<Record<string, any>>
+    review_sections?: Record<string, Array<Record<string, any>>>
+    integrity_checks?: Array<{ check: string; status: "passed" | "warning"; detail: string }>
+    source_ledger?: Array<{ section: string; source_type: string; source: string; rule: string }>
+    business_events?: string[]
+    strategy_notes?: string
+    planning?: {
+      targets: Record<string, number | null>
+      baseline: Record<string, number | null>
+      validation: Array<Record<string, any>>
+      source_type: string
+    }
   }
   mcp_result: Record<string, any>
   skill: { name: string; display_name: string; version: string }
@@ -951,6 +1006,10 @@ export interface CustomerDailyMetric {
 }
 
 export interface MemberAnalysis {
+  asset_date: string | null
+  overview_latest_date: string | null
+  channel_latest_date: string | null
+  channel_new_members: number
   total_members: number
   paid_members: number
   paid_amount: number
@@ -1102,6 +1161,23 @@ export interface CpsAnalysis {
   preorder_deposit_amount: number
   preorder_total_amount: number
   daily_metrics: CpsDailyMetric[]
+  product_metrics: CpsProductMetric[]
+}
+
+export interface CpsProductMetric {
+  product_id: string
+  product_name: string
+  series: string
+  positioning: string
+  entry_visitors: number
+  paid_amount: number
+  paid_order_count: number
+  paid_buyer_count: number
+  estimated_expense: number
+  settled_amount: number
+  settled_expense: number
+  conversion_rate: number
+  expense_rate: number
 }
 
 export interface CpsDailyMetric {
@@ -1278,147 +1354,6 @@ export interface SystemCapabilities {
   enabled_modules: string[]
   disabled_modules: string[]
   safety_rules: string[]
-}
-
-export interface CaptureFamilySummary {
-  family: string
-  observations: number
-}
-
-export interface CaptureSummary {
-  file_count: number
-  first_date: string | null
-  last_date: string | null
-  imported_at: string | null
-  families: CaptureFamilySummary[]
-  daily_requests: Array<{
-    business_date: string | null
-    date_mode: string
-    files: number
-  }>
-}
-
-export interface ResponseEvidence {
-  files: number
-  json_like_files: number
-  samples: Array<Record<string, unknown>>
-  shape: Array<Record<string, unknown>>
-}
-
-export interface EndpointContract {
-  host: string
-  path: string
-  method: string
-  calls: number
-  daily_calls: number
-  success_calls: number
-  statuses: Record<string, number>
-  date_modes: Record<string, number>
-  business_dates: Record<string, number>
-  sample_params: Record<string, string>
-  sample_headers: Record<string, string>
-  response: ResponseEvidence
-}
-
-export interface ContractSummary {
-  generated_at: string | null
-  source: string
-  api_observations: number
-  endpoint_contracts: number
-  daily_observations: number
-  business_dates: Record<string, number>
-  date_modes: Record<string, number>
-  priority_paths: EndpointContract[]
-}
-
-export interface ContractCatalog {
-  generated_at: string | null
-  contracts: EndpointContract[]
-}
-
-export interface ImportRequestContract {
-  method: string
-  url: string
-  query_params: Record<string, unknown>
-  body_template: Record<string, unknown> | null
-  runtime_credentials: string[]
-  target_table: string
-  execute: boolean
-  write_database: boolean
-}
-
-export interface ImportCandidate {
-  function: string
-  line: number | null
-  priority: string
-  legacy_path: string
-  date_mode: string
-  shape_status: string
-  request_contract: ImportRequestContract
-}
-
-export interface DailyDryRunSummary {
-  generated_at: string | null
-  mode: string
-  day: string
-  timezone: string
-  source: string
-  capture_db: string
-  guardrails: {
-    platform_requests_executed: number
-    mysql_writes: number
-    sqlite_connection: string
-    raw_cookies_or_tokens_persisted: boolean
-  }
-  selected_priorities: string[]
-  selected: ImportCandidate[]
-  deferred: Array<{
-    function: string
-    priority: string
-    legacy_path: string
-    reason: string
-  }>
-}
-
-export interface ImportRun {
-  run_id: string
-  day: string
-  mode: string
-  status: string
-  source: string
-  generated_at: string | null
-  created_at: string
-  updated_at: string
-  selected_count: number
-  deferred_count: number
-  guardrails: DailyDryRunSummary["guardrails"]
-}
-
-export interface ImportRunItem {
-  item_id: number
-  run_id: string
-  item_order: number
-  function_name: string
-  priority: string
-  legacy_path: string
-  method: string
-  url: string
-  target_table: string
-  date_mode: string
-  shape_status: string
-  runtime_credentials: string[]
-  query_params: Record<string, unknown>
-  body_template: Record<string, unknown> | null
-  status: string
-  risk_notes: string[]
-}
-
-export interface ImportRunDetail extends ImportRun {
-  items: ImportRunItem[]
-}
-
-export interface ImportRunList {
-  runs: ImportRun[]
 }
 
 export interface CrawlRunDay {
@@ -1784,21 +1719,6 @@ export interface StoreDataPreview {
   rows: Array<Record<string, unknown>>
 }
 
-export interface OperationCapability {
-  key: string
-  title: string
-  status: "enabled" | "dry_run_only" | "disabled" | "planned"
-  risk_level: "low" | "medium" | "high"
-  mode: string
-  guardrails: string[]
-}
-
-export interface OperationCenterSummary {
-  mode: "read_only" | "dry_run_only"
-  capabilities: OperationCapability[]
-  required_flow: string[]
-}
-
 export interface PlatformRecord {
   platform_id: number
   code: string
@@ -1815,6 +1735,15 @@ export interface StoreRecord {
   status: string
   first_seen_at: string
   updated_at: string
+}
+
+export interface SellerLoginStatus {
+  status: "offline" | "ready" | "login_required" | "authenticated" | string
+  detail: string
+  browser_connected: boolean
+  debug_port: number
+  login_url: string
+  page_url: string | null
 }
 
 export interface AuthConfiguration {
@@ -1981,4 +1910,66 @@ export interface StoreDailyOverview {
   platform_duty_rate: number
   pickup_24h_rate: number
   logistics_arrival_hours: number
+}
+
+export interface BigScreenKpi {
+  paid_amount: string
+  visitors: number
+  buyers: number
+  conversion_rate: string
+  promotion_cost: string
+  promotion_paid_amount: string
+  promotion_roi: string
+  refund_amount: string
+  net_paid_amount: string
+}
+
+export interface BigScreenSummary {
+  range_start: string
+  range_end: string
+  days: number
+  kpi: BigScreenKpi
+  growth_factor: {
+    transaction_score: string | null
+    traffic_score: string | null
+    item_score: string | null
+    marketing_score: string | null
+    service_score: string | null
+  }
+  experience_score: {
+    total_score: string | null
+    item_score: string | null
+    logistics_score: string | null
+    service_score: string | null
+    refund_score: string | null
+    dispute_score: string | null
+  }
+  level_info: {
+    level: string | null
+    score: string | null
+    rank_percentile: string | null
+  }
+}
+
+export interface BigScreenTrendPoint {
+  date: string
+  paid_amount: string
+  visitors: number
+  promotion_cost: string
+  promotion_paid_amount: string
+}
+
+export interface BigScreenTrafficSource {
+  name: string
+  visitors: number
+  paid_amount: string
+  share_percent: string
+}
+
+export interface BigScreenPromoRoiItem {
+  campaign_id: string
+  campaign_name: string
+  spend: string
+  paid_amount: string
+  roi: string
 }

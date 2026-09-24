@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
+import type { Component } from "vue"
 import {
   Archive,
   BarChart3,
@@ -23,6 +24,7 @@ import {
   Target,
   Trash2,
   TriangleAlert,
+  Workflow,
   X,
 } from "lucide-vue-next"
 import { analyzeWithAI, cancelAIStream, deleteAIConversation, fetchAIConversation, fetchAIConversations, streamAnalyzeWithAI, streamPeriodReport } from "@/api"
@@ -30,11 +32,14 @@ import type { AIStreamEvent } from "@/api"
 import type { AIAnalysisResponse, PeriodReportResponse } from "@/types"
 import { useDashboard } from "@/composables/useDashboard"
 import BusinessChart from "@/components/BusinessChart.vue"
+import ManagementReportBuilder from "@/components/ManagementReportBuilder.vue"
+import type { ManagementReportRequest } from "@/components/ManagementReportBuilder.vue"
 import { renderMarkdown } from "@/utils/markdown"
 import { useAIStreamStatus } from "@/composables/useAIStreamStatus"
 
-type ReportType = "daily" | "weekly" | "monthly" | "mtd" | "daily_series"
+type ReportType = "daily" | "weekly" | "monthly" | "mtd" | "daily_series" | "business_review"
 type ReportIntent = { report_type: ReportType; anchor_date?: string }
+type QuickAction = { label: string; prompt: string; icon: Component; tone: string; report?: ReportType; builder?: boolean }
 type StreamStep = { kind: string; name: string; status: string; detail: string; startedAt?: number; elapsedMs?: number }
 type ChatMessage = {
   id: string
@@ -55,7 +60,7 @@ type ChatMessage = {
 type ChatSession = { id: string; title: string; updatedAt: number; messages: ChatMessage[] }
 type AIArtifact = { type: string; title: string; columns?: Array<Record<string, string>>; rows?: Array<Record<string, any>>; option?: Record<string, any> }
 type ReportCoverage = { missing_dates: string[]; missing_datasets: string[]; partial_datasets: string[]; failed_datasets: string[]; no_data_datasets: string[] }
-type ReportQuality = { missing_sections?: string[]; no_data_sections?: string[]; missing_dates?: string[]; missing_datasets?: string[]; partial_datasets?: string[]; failed_datasets?: string[]; no_data_datasets?: string[] }
+type ReportQuality = { status?: string; latest_data_date?: string; missing_sections?: string[]; no_data_sections?: string[]; missing_dates?: string[]; missing_datasets?: string[]; partial_datasets?: string[]; failed_datasets?: string[]; no_data_datasets?: string[] }
 
 const STORAGE_KEY = "echomerch.ai.workbench.sessions.v2"
 const { startDate, endDate, currentStoreId } = useDashboard()
@@ -68,6 +73,7 @@ const composer = ref<HTMLTextAreaElement | null>(null)
 const conversation = ref<HTMLElement | null>(null)
 const showHistory = ref(false)
 const showInspector = ref(false)
+const showReportBuilder = ref(false)
 const thinkingClock = ref(0)
 let thinkingTimer: ReturnType<typeof setInterval> | undefined
 const abortController = ref<AbortController | null>(null)
@@ -76,9 +82,10 @@ const streamStatusTitle = streamStatus.title
 const streamStatusDetail = streamStatus.detail
 const streamElapsedMs = streamStatus.elapsedMs
 
-const quickActions = [
+const quickActions: QuickAction[] = [
   { label: "查库存", prompt: "查一下大鱼 M 码库存", icon: PackageSearch, tone: "green" },
   { label: "经营诊断", prompt: "为什么最近成交下降？给我最重要的三个原因和动作", icon: Target, tone: "blue" },
+  { label: "经营复盘", prompt: "", icon: FileCheck2, tone: "purple", builder: true },
   { label: "生成日报", prompt: "生成今天的经营日报", icon: FileCheck2, tone: "purple", report: "daily" as ReportType },
   { label: "渠道分析", prompt: "哪些渠道值得加预算？请结合投入产出分析", icon: BarChart3, tone: "amber" },
 ]
@@ -220,6 +227,20 @@ function updateSessionMessages(session: ChatSession, nextMessages: ChatMessage[]
   persistSessions()
 }
 
+function replaceStaleSessionId(session: ChatSession, title: string) {
+  const previousId = session.id
+  const nextId = uid("session")
+  session.id = nextId
+  session.title = title.slice(0, 24) || "新对话"
+  if (activeSessionId.value === previousId) activeSessionId.value = nextId
+  persistSessions()
+  return nextId
+}
+
+function isConversationScopeError(error: unknown) {
+  return /会话不存在|不属于当前账号|不属于当前.*店铺/.test(errorText(error))
+}
+
 function updateActiveMessages(nextMessages: ChatMessage[]) {
   const session = activeSession.value
   if (session) updateSessionMessages(session, nextMessages)
@@ -233,6 +254,17 @@ function useQuestion(value: string) {
   question.value = value
   showInspector.value = false
   nextTick(() => composer.value?.focus())
+}
+
+function useQuickAction(action: QuickAction) {
+  if (action.builder) {
+    showReportBuilder.value = true
+    showHistory.value = false
+    nextTick(() => conversation.value?.scrollTo({ top: 0, behavior: "smooth" }))
+    return
+  }
+  if (action.report) void runReport(action.report)
+  else useQuestion(action.prompt)
 }
 
 function formatNumber(value: unknown, digits = 0) {
@@ -271,7 +303,7 @@ function stepElapsedText(step: { elapsedMs?: number; elapsed_ms?: number | null 
   return value == null ? "进行中" : elapsedText(value)
 }
 function streamStepLabel(step: { kind: string; name: string }) {
-  if (step.kind === "planner") return "经营问题路由"
+  if (step.kind === "planner") return step.name === "evidence-driven-agent-planner" || step.name === "evidence-quality-gate" ? "Agent 证据规划" : "经营问题路由"
   if (step.kind === "skill") return "Agent 能力编排"
   if (step.kind === "mcp") return `数据工具 · ${step.name}`
   if (step.kind === "model") return `分析模型 · ${step.name}`
@@ -412,6 +444,23 @@ function nextQuestions(message: ChatMessage) {
 function evidenceRefs(message: ChatMessage) {
   return message.analysis?.diagnosis.evidence_refs || []
 }
+function analysisPlan(message: ChatMessage) {
+  const plan = message.analysis?.diagnosis.analysis_plan
+  return plan && "name" in plan ? plan : null
+}
+function planRange(values: string[] | undefined) {
+  if (!values?.length) return "--"
+  return values.length === 1 || values[0] === values[1] ? values[0] : `${values[0]} 至 ${values[1]}`
+}
+function agentToolLabel(tool: string) {
+  return ({
+    "data.coverage": "数据覆盖审计",
+    "data.compare_periods": "同口径周期比较",
+    "data.query": "结构化数据查询",
+    "promotions.get_efficiency": "推广账户总盘",
+    "promotions.get_drilldown": "推广层级下钻",
+  } as Record<string, string>)[tool] || tool
+}
 function freshnessText(value: unknown) { return value === "stale" ? "已过期" : value === "fresh" ? "最新" : "未知" }
 function artifactColumns(artifact: AIArtifact) {
   return artifact?.rows?.length ? Object.keys(artifact.rows[0]) : []
@@ -517,6 +566,7 @@ function reportArtifacts(message: ChatMessage): AIArtifact[] { return (message.r
 function reportDisplayTitle(message: ChatMessage) {
   const report = message.report
   if (!report) return "经营报告"
+  if (report.report_type === "business_review") return report.title || String(report.report.report_title || "经营复盘")
   const start = new Date(`${report.range_start}T00:00:00`)
   if (Number.isNaN(start.getTime())) return report.title
   const year = String(start.getFullYear()).slice(-2)
@@ -526,6 +576,54 @@ function reportDisplayTitle(message: ChatMessage) {
   if (report.report_type === "monthly") return `${year}年-${month}月月报`
   if (report.report_type === "daily") return `${year}年-${month}月${start.getDate()}日日报`
   return `${report.range_start} 至 ${report.range_end} 周报`
+}
+function reportComparisonLabel(message: ChatMessage) { return String(message.report?.report?.comparison_label || "环比") }
+function reportMonthlyRows(message: ChatMessage): Array<Record<string, any>> { return message.report?.report?.monthly_trend || [] }
+function reportManagementSections(message: ChatMessage) {
+  const sections = message.report?.report?.review_sections || {}
+  const labels: Record<string, string> = {
+    traffic: "流量来源",
+    product_series: "系列销售结构",
+    product_types: "商品类型结构",
+    customers: "客户生命周期",
+    members: "会员经营",
+    customer_service: "客服经营",
+    promotions: "推广场景",
+  }
+  return Object.entries(sections)
+    .map(([key, rows]) => ({ key, label: labels[key] || key, rows: Array.isArray(rows) ? rows as Array<Record<string, any>> : [] }))
+    .filter((item) => item.rows.length)
+}
+function reportIntegrityChecks(message: ChatMessage): Array<Record<string, any>> { return message.report?.report?.integrity_checks || [] }
+function reportSourceLedger(message: ChatMessage): Array<Record<string, any>> { return message.report?.report?.source_ledger || [] }
+function reportBusinessEvents(message: ChatMessage): string[] { return message.report?.report?.business_events || [] }
+function reportPlanning(message: ChatMessage): Record<string, any> { return message.report?.report?.planning || {} }
+function reviewColumns(rows: Array<Record<string, any>>) { return rows.length ? Object.keys(rows[0]) : [] }
+function reviewCell(column: string, value: unknown) {
+  if (value == null || value === "") return "--"
+  if (typeof value !== "number") return String(value)
+  if (/(金额|花费|成交|GMV|gmv)/i.test(column)) return money(value)
+  if (/(变化%|占比|率$|率%|同比|环比)/.test(column)) return `${formatNumber(value, 2)}%`
+  if (/pt|百分点/.test(column)) return `${value >= 0 ? "+" : ""}${formatNumber(value, 2)}pt`
+  return formatNumber(value, 2)
+}
+function managementTrendOption(message: ChatMessage) {
+  const rows = reportMonthlyRows(message)
+  if (!rows.length) return null
+  return {
+    color: ["#16845b", "#7787f2", "#e0a04b", "#9a7ac4"],
+    tooltip: { trigger: "axis", valueFormatter: (value: unknown) => `¥${formatNumber(Number(value), 2)}万` },
+    legend: { bottom: 0, textStyle: { color: "#6f8177", fontSize: 12 } },
+    grid: { left: 54, right: 20, top: 18, bottom: 48 },
+    xAxis: { type: "category", data: rows.map((row) => row["月份"]), axisLabel: { color: "#74877d" } },
+    yAxis: { type: "value", name: "万元", nameTextStyle: { color: "#8a9a91" }, splitLine: { lineStyle: { color: "#edf2ef" } } },
+    series: [
+      { name: "本期支付", type: "line", smooth: true, symbolSize: 6, data: rows.map((row) => Number(row["本期支付金额"] || 0) / 10000) },
+      { name: "对比期支付", type: "line", smooth: true, symbolSize: 6, lineStyle: { type: "dashed" }, data: rows.map((row) => Number(row["对比期支付金额"] || 0) / 10000) },
+      { name: "本期净支付", type: "bar", barMaxWidth: 16, data: rows.map((row) => Number(row["本期净支付金额"] || 0) / 10000) },
+      { name: "对比期净支付", type: "bar", barMaxWidth: 16, data: rows.map((row) => Number(row["对比期净支付金额"] || 0) / 10000) },
+    ],
+  }
 }
 function reportCoverage(message: ChatMessage): ReportCoverage {
   const coverage = message.report?.diagnosis?.coverage
@@ -540,15 +638,24 @@ function reportCoverage(message: ChatMessage): ReportCoverage {
 function reportQuality(message: ChatMessage) {
   const quality = (reportData(message)?.data_quality || {}) as ReportQuality
   const coverage = reportCoverage(message)
+  const useReportScopeOnly = message.report?.report_type === "business_review" && Object.keys(quality).length > 0
   return {
     missingSections: quality.missing_sections || [],
     noDataSections: quality.no_data_sections || [],
-    missingDates: quality.missing_dates?.length ? quality.missing_dates : coverage.missing_dates || [],
-    missingDatasets: quality.missing_datasets?.length ? quality.missing_datasets : coverage.missing_datasets || [],
-    partialDatasets: quality.partial_datasets?.length ? quality.partial_datasets : coverage.partial_datasets || [],
-    failedDatasets: quality.failed_datasets?.length ? quality.failed_datasets : coverage.failed_datasets || [],
-    noDataDatasets: quality.no_data_datasets?.length ? quality.no_data_datasets : coverage.no_data_datasets || [],
+    missingDates: useReportScopeOnly ? quality.missing_dates || [] : quality.missing_dates?.length ? quality.missing_dates : coverage.missing_dates || [],
+    missingDatasets: useReportScopeOnly ? quality.missing_datasets || [] : quality.missing_datasets?.length ? quality.missing_datasets : coverage.missing_datasets || [],
+    partialDatasets: useReportScopeOnly ? quality.partial_datasets || [] : quality.partial_datasets?.length ? quality.partial_datasets : coverage.partial_datasets || [],
+    failedDatasets: useReportScopeOnly ? quality.failed_datasets || [] : quality.failed_datasets?.length ? quality.failed_datasets : coverage.failed_datasets || [],
+    noDataDatasets: useReportScopeOnly ? quality.no_data_datasets || [] : quality.no_data_datasets?.length ? quality.no_data_datasets : coverage.no_data_datasets || [],
   }
+}
+function reportComparisonQuality(message: ChatMessage): ReportQuality {
+  return (message.report?.report?.comparison_data_quality || {}) as ReportQuality
+}
+function dateListText(values: string[] | undefined) {
+  const dates = values || []
+  if (dates.length <= 6) return dates.join("、")
+  return `${dates.slice(0, 5).join("、")} 等 ${dates.length} 天`
 }
 
 function lastDayOfMonth(year: number, month: number) {
@@ -610,11 +717,21 @@ function extractTargetGmv(text: string): number | undefined {
 
 async function runReport(type: ReportType) {
   if (loading.value) return
+  if (type === "business_review") {
+    showReportBuilder.value = true
+    return
+  }
   const title = { daily: "生成今天的经营日报", weekly: "生成本周经营复盘", monthly: "生成本月经营复盘", mtd: "生成本月至今经营复盘", daily_series: "生成本月逐日经营日报" }[type]
   await send(title, type)
 }
 
-async function send(value = question.value, reportType?: ReportType) {
+async function generateManagementReport(request: ManagementReportRequest) {
+  showReportBuilder.value = false
+  const label = request.report_title || `${request.start_date} 至 ${request.end_date} 经营复盘`
+  await send(label, "business_review", request)
+}
+
+async function send(value = question.value, reportType?: ReportType, reportRequest?: ManagementReportRequest) {
   const text = value.trim()
   if (!text || loading.value || !activeSession.value) return
   const targetSession = activeSession.value
@@ -654,24 +771,42 @@ async function send(value = question.value, reportType?: ReportType) {
     scrollConversation()
   }
   try {
-    if (reportType) {
-        const report = await streamPeriodReport({ report_type: reportType, conversation_id: targetSession.id, anchor_date: currentRange.value, store_id: currentStoreId.value, use_model: true }, onStreamEvent, controller.signal)
-      stopThinkingClock(pending)
-      updateSessionMessages(targetSession, [...targetSession.messages.filter((item) => item.id !== pending.id), { ...pending, loading: false, report }])
-    } else {
+    const executeRequest = async (conversationId: string): Promise<{ analysis?: AIAnalysisResponse; report?: PeriodReportResponse }> => {
+      if (reportType) {
+        const report = await streamPeriodReport({
+          ...(reportRequest || { report_type: reportType, anchor_date: currentRange.value }),
+          conversation_id: conversationId,
+          store_id: currentStoreId.value,
+          use_model: true,
+        }, onStreamEvent, controller.signal)
+        return { report }
+      }
       const inferredReportIntent = inferReportIntent(text)
       if (inferredReportIntent) {
-        const report = await streamPeriodReport({ report_type: inferredReportIntent.report_type, conversation_id: targetSession.id, anchor_date: inferredReportIntent.anchor_date || currentRange.value, store_id: currentStoreId.value, target_gmv: extractTargetGmv(text), use_model: true }, onStreamEvent, controller.signal)
-        stopThinkingClock(pending)
-        updateSessionMessages(targetSession, [...targetSession.messages.filter((item) => item.id !== pending.id), { ...pending, loading: false, report }])
-      } else {
-        const request = { question: text, conversation_id: targetSession.id, store_id: currentStoreId.value, start_date: analysisStartDate.value, end_date: analysisEndDate.value, page_context: workbenchPageContext.value, use_model: true }
-        const analysis = isLightChatQuestion(text)
-          ? await analyzeWithAI(request, controller.signal)
-          : await streamAnalyzeWithAI(request, onStreamEvent, controller.signal)
-        stopThinkingClock(pending)
-        updateSessionMessages(targetSession, [...targetSession.messages.filter((item) => item.id !== pending.id), { ...pending, loading: false, analysis }])
+        const report = await streamPeriodReport({ report_type: inferredReportIntent.report_type, conversation_id: conversationId, anchor_date: inferredReportIntent.anchor_date || currentRange.value, store_id: currentStoreId.value, target_gmv: extractTargetGmv(text), use_model: true }, onStreamEvent, controller.signal)
+        return { report }
       }
+      const request = { question: text, conversation_id: conversationId, store_id: currentStoreId.value, start_date: analysisStartDate.value, end_date: analysisEndDate.value, page_context: workbenchPageContext.value, use_model: true }
+      const analysis = isLightChatQuestion(text)
+        ? await analyzeWithAI(request, controller.signal)
+        : await streamAnalyzeWithAI(request, onStreamEvent, controller.signal)
+      return { analysis }
+    }
+
+    let result: { analysis?: AIAnalysisResponse; report?: PeriodReportResponse }
+    try {
+      result = await executeRequest(targetSession.id)
+    } catch (err) {
+      if (!isConversationScopeError(err) || controller.signal.aborted) throw err
+      result = await executeRequest(replaceStaleSessionId(targetSession, text))
+    }
+    stopThinkingClock(pending)
+    if (result.report) {
+      updateSessionMessages(targetSession, [...targetSession.messages.filter((item) => item.id !== pending.id), { ...pending, loading: false, report: result.report }])
+    } else if (result.analysis) {
+      updateSessionMessages(targetSession, [...targetSession.messages.filter((item) => item.id !== pending.id), { ...pending, loading: false, analysis: result.analysis }])
+    } else {
+      throw new Error("AI 请求完成但没有返回可展示的结果")
     }
   } catch (err) {
     stopThinkingClock(pending)
@@ -714,16 +849,17 @@ onBeforeUnmount(() => {
     <aside class="ai-workbench-sidebar" :class="{ open: showHistory }">
       <div class="ai-side-top"><div class="ai-brand-mark"><Sparkles :size="16" /></div><div><strong>AI 工作台</strong><small>经营数据助手</small></div><button class="ai-side-close" title="关闭会话栏" @click="showHistory = false"><X :size="16" /></button></div>
       <button class="ai-new-session" type="button" @click="createSession()"><Plus :size="16" />新建对话</button>
-      <div class="ai-side-section"><div class="ai-side-section-title"><span>常用能力</span><small>快捷开始</small></div><button v-for="action in quickActions" :key="action.label" class="ai-capability" type="button" @click="action.report ? runReport(action.report) : useQuestion(action.prompt)"><span :class="`ai-capability-icon ${action.tone}`"><component :is="action.icon" :size="15" /></span><span>{{ action.label }}</span><ChevronRight :size="14" /></button></div>
+      <div class="ai-side-section"><div class="ai-side-section-title"><span>常用能力</span><small>快捷开始</small></div><button v-for="action in quickActions" :key="action.label" class="ai-capability" type="button" @click="useQuickAction(action)"><span :class="`ai-capability-icon ${action.tone}`"><component :is="action.icon" :size="15" /></span><span>{{ action.label }}</span><ChevronRight :size="14" /></button></div>
       <div class="ai-side-section ai-history-section"><div class="ai-side-section-title"><span>最近对话</span><small>{{ sessions.length }}</small></div><div v-if="sessions.length" class="ai-session-list"><button v-for="session in sessions.slice(0, 8)" :key="session.id" class="ai-session" :class="{ active: session.id === activeSessionId }" type="button" @click="selectSession(session.id)"><MessageSquare :size="14" /><span>{{ session.title }}</span><small>{{ session.messages.length ? messageTime(session.updatedAt) : "空" }}</small><i title="删除对话" @click.stop="removeSession(session.id)"><Trash2 :size="13" /></i></button></div><div v-else class="ai-session-empty">还没有对话记录</div></div>
       <div class="ai-side-foot"><Archive :size="14" /><span>只读分析 · 数据可追溯</span></div>
     </aside>
 
     <section class="ai-chat-shell">
-      <header class="ai-chat-header"><div class="ai-chat-title"><button class="ai-mobile-toggle" type="button" title="打开会话栏" @click="showHistory = true"><MessageSquare :size="17" /></button><div><span class="ai-eyebrow"><Bot :size="14" />AI 经营决策中心</span><h1>{{ activeSession?.title || "新对话" }}</h1></div></div><div class="ai-chat-actions"><span class="ai-live-badge"><span></span>已连接</span><button class="ai-inspector-toggle" type="button" @click="showInspector = !showInspector"><FileSearch :size="15" />数据范围</button></div></header>
+      <header class="ai-chat-header"><div class="ai-chat-title"><button class="ai-mobile-toggle" type="button" title="打开会话栏" @click="showHistory = true"><MessageSquare :size="17" /></button><div><span class="ai-eyebrow"><Bot :size="14" />AI 经营决策中心</span><h1>{{ activeSession?.title || "新对话" }}</h1></div></div><div class="ai-chat-actions"><span class="ai-live-badge"><span></span>已连接</span><button class="ai-inspector-toggle" type="button" @click="showReportBuilder = !showReportBuilder"><FileCheck2 :size="15" />经营复盘</button><button class="ai-inspector-toggle" type="button" @click="showInspector = !showInspector"><FileSearch :size="15" />数据范围</button></div></header>
 
       <main ref="conversation" class="ai-conversation">
-        <div v-if="!messages.length" class="ai-welcome"><div class="ai-welcome-orb"><Sparkles :size="28" /></div><h2>把经营问题交给 AI</h2><p>直接提问库存、成交、流量或推广问题。AI 会先读取结构化数据，再给出结论、依据和下一步动作。</p><div class="ai-welcome-grid"><button v-for="item in suggestedQuestions" :key="item" type="button" @click="useQuestion(item)"><span>{{ item }}</span><ChevronRight :size="15" /></button></div></div>
+        <ManagementReportBuilder v-if="showReportBuilder" :default-start="analysisStartDate" :default-end="analysisEndDate" :loading="loading" @generate="generateManagementReport" @close="showReportBuilder = false" />
+        <div v-if="!messages.length && !showReportBuilder" class="ai-welcome"><div class="ai-welcome-orb"><Sparkles :size="28" /></div><h2>把经营问题交给 AI</h2><p>直接提问库存、成交、流量或推广问题。AI 会先读取结构化数据，再给出结论、依据和下一步动作。</p><div class="ai-welcome-grid"><button v-for="item in suggestedQuestions" :key="item" type="button" @click="useQuestion(item)"><span>{{ item }}</span><ChevronRight :size="15" /></button></div></div>
         <template v-for="message in messages" :key="message.id">
           <div v-if="message.role === 'user'" class="ai-message ai-message-user"><div class="ai-message-body"><p>{{ message.text }}</p><time>{{ messageTime(message.createdAt) }}</time></div><div class="ai-user-avatar">A</div></div>
           <div v-else class="ai-message ai-message-assistant"><div class="ai-assistant-avatar"><Bot :size="17" /></div><div class="ai-message-body ai-result-body">
@@ -748,6 +884,15 @@ onBeforeUnmount(() => {
               <div class="ai-agent-capabilities ai-agent-capabilities-final"><span>Agent 能力</span><b>{{ message.analysis.skill.display_name }}</b><em v-for="skill in message.analysis.supporting_skills" :key="skill.name">{{ skill.display_name }}</em><small>{{ message.analysis.execution_steps.filter((step) => step.kind === 'mcp' && step.status === 'completed').length }} 个数据工具已完成</small></div>
               <h2>{{ cleanReportNarrative(message.analysis.diagnosis.headline) }}</h2><section v-if="message.analysis.provider !== 'rules' && cleanReportNarrative(message.analysis.answer)" class="ai-model-supplement"><div class="ai-block-title"><Sparkles :size="14" />AI 补充判断 <small>{{ message.analysis.model }}</small></div><div class="ai-answer ai-markdown-content" v-html="renderReportNarrative(message.analysis.answer)"></div></section>
               <div v-if="!inventoryData(message)" class="ai-coverage-card"><div><small>数据覆盖</small><strong>{{ message.analysis.diagnosis.coverage.covered_days || 0 }}/{{ message.analysis.diagnosis.coverage.expected_days || 0 }} 天</strong></div><div><small>最新业务日</small><strong>{{ message.analysis.diagnosis.coverage.latest_data_date || '--' }}</strong></div><div><small>辅助能力</small><strong>{{ message.analysis.supporting_skills.length }} 个</strong></div><span v-if="message.analysis.diagnosis.coverage.missing_dates.length" class="coverage-alert">缺失 {{ message.analysis.diagnosis.coverage.missing_dates.slice(0, 3).join('、') }}<span v-if="message.analysis.diagnosis.coverage.missing_dates.length > 3"> 等</span></span><span v-else-if="message.analysis.diagnosis.coverage.no_data_datasets.length" class="coverage-muted">平台无数据：{{ message.analysis.diagnosis.coverage.no_data_datasets.slice(0, 2).join('、') }}</span></div>
+              <details v-if="analysisPlan(message)" class="ai-result-block ai-decision-trace">
+                <summary><span><Workflow :size="15" />决策链</span><small>{{ analysisPlan(message)?.steps.length }} 步 · {{ planRange(analysisPlan(message)?.intent.current_range) }}</small></summary>
+                <div class="ai-decision-trace-body">
+                  <header><strong>{{ analysisPlan(message)?.intent.goal }}</strong><span>对比 {{ planRange(analysisPlan(message)?.intent.previous_range) }}</span></header>
+                  <ol><li v-for="(step, index) in analysisPlan(message)?.steps" :key="`${step.tool}-${index}`"><i>{{ index + 1 }}</i><div><strong>{{ agentToolLabel(step.tool) }}</strong><span>{{ step.purpose }}</span></div></li></ol>
+                  <div class="ai-decision-completion"><CheckCircle2 :size="15" /><div><small>证据完成条件</small><span>{{ analysisPlan(message)?.completion_rule }}</span></div></div>
+                  <ul v-if="analysisPlan(message)?.intent.hypotheses.length"><li v-for="item in analysisPlan(message)?.intent.hypotheses" :key="item">{{ item }}</li></ul>
+                </div>
+              </details>
               <div v-if="utryCurrent(message)" class="ai-utry-summary">
                 <article><small>同店 30 日回购</small><strong>{{ money(utryCurrent(message)?.store_30d_repurchase_amount) }}</strong><span>{{ formatNumber(utryCurrent(message)?.store_30d_repurchase_uv) }} UV</span></article>
                 <article><small>同店 90 日回购</small><strong>{{ money(utryCurrent(message)?.store_90d_repurchase_amount) }}</strong><span>{{ formatNumber(utryCurrent(message)?.store_90d_repurchase_uv) }} UV</span></article>
@@ -778,7 +923,7 @@ onBeforeUnmount(() => {
                 <details v-else-if="artifact.rows?.length && isFullInventoryArtifact(artifact)" class="ai-result-block ai-collapsible-artifact"><summary><span><FileCheck2 :size="15" />{{ artifact.title }}</span><small>查看全部 {{ artifact.rows.length }} 个匹配条目</small></summary><div class="ai-evidence-scroll"><table><thead><tr><th v-for="column in artifactColumns(artifact)" :key="column">{{ column }}</th></tr></thead><tbody><tr v-for="(row, index) in artifactRows(artifact)" :key="index"><td v-for="column in artifactColumns(artifact)" :key="column">{{ formatCell(row[column]) }}</td></tr></tbody></table></div></details>
                 <div v-else-if="artifact.rows?.length" class="ai-result-block"><div class="ai-block-title"><FileCheck2 :size="15" />{{ artifact.title }}</div><div class="ai-evidence-scroll"><table><thead><tr><th v-for="column in artifactColumns(artifact)" :key="column">{{ column }}</th></tr></thead><tbody><tr v-for="(row, index) in artifactRows(artifact)" :key="index"><td v-for="column in artifactColumns(artifact)" :key="column">{{ formatCell(row[column]) }}</td></tr></tbody></table></div></div>
               </template>
-              <div v-if="message.analysis.diagnosis.actions.length" class="ai-result-block"><div class="ai-block-title"><Target :size="15" />建议动作</div><div class="ai-actions-list"><article v-for="action in message.analysis.diagnosis.actions" :key="`${action.priority}-${action.title}`"><b>{{ action.priority }}</b><div><strong>{{ cleanReportNarrative(action.title) }}</strong><span>{{ cleanReportNarrative(action.detail) }}</span><small>负责人：{{ action.owner }} · 验证：{{ cleanReportNarrative(action.validation || "--") }}</small><small>观察：{{ action.observation_window || "--" }} · 预期：{{ action.expected_impact || "--" }}</small></div></article></div></div>
+              <div v-if="message.analysis.diagnosis.actions.length" class="ai-result-block"><div class="ai-block-title"><Target :size="15" />建议动作</div><div class="ai-actions-list"><article v-for="action in message.analysis.diagnosis.actions" :key="`${action.priority}-${action.title}`"><b>{{ action.priority }}</b><div><strong>{{ cleanReportNarrative(action.title) }}</strong><span>{{ cleanReportNarrative(action.detail) }}</span><small>负责人：{{ action.owner }} · 验证：{{ cleanReportNarrative(action.validation || "--") }}</small><small>观察：{{ action.observation_window || "--" }} · 预期：{{ action.expected_impact || "--" }}</small><small v-if="action.verify_metric || action.stop_condition">指标：{{ action.verify_metric || "--" }}<template v-if="action.stop_condition"> · 停止：{{ action.stop_condition }}</template></small></div></article></div></div>
               <div v-if="nextQuestions(message).length" class="ai-result-block ai-next-questions"><div class="ai-block-title"><Sparkles :size="15" />继续追问</div><div class="ai-question-chips"><button v-for="item in nextQuestions(message).slice(0, 4)" :key="item" type="button" @click="useQuestion(item)">{{ cleanReportNarrative(item) }}</button></div></div>
               <div v-if="message.analysis.diagnosis.missing_inputs.length || message.analysis.diagnosis.assumptions.length" class="ai-result-block ai-result-boundary"><div class="ai-block-title"><CircleHelp :size="15" />口径与待补输入</div><p v-if="message.analysis.diagnosis.missing_inputs.length">待补输入：{{ message.analysis.diagnosis.missing_inputs.join('、') }}</p><p v-for="item in message.analysis.diagnosis.assumptions" :key="item">{{ item }}</p><p v-if="message.analysis.diagnosis.causal_boundary">{{ message.analysis.diagnosis.causal_boundary }}</p></div>
               <div v-if="message.analysis.warnings.length" class="ai-result-warning"><TriangleAlert :size="14" />{{ message.analysis.warnings.join("；") }}</div>
@@ -790,29 +935,34 @@ onBeforeUnmount(() => {
               <details class="ai-result-block ai-reasoning-trace"><summary><span><Clock3 :size="15" />分析过程</span><small>耗时 {{ elapsedText(message.elapsedMs) }} · 点击展开</small></summary><div class="ai-live-step-list"><div v-for="(step, index) in message.streamSteps || message.report.execution_steps || []" :key="`${step.kind}-${step.name}-${index}`" :class="`is-${step.status}`"><CheckCircle2 :size="13" /><span><b>{{ streamStepLabel(step) }}</b><small>{{ step.detail }} · {{ stepElapsedText(step) }}</small></span></div></div></details>
               <div class="ai-report-period"><div><h2>{{ reportDisplayTitle(message) }}</h2><small>{{ message.report.range_start }} 至 {{ message.report.range_end }}<template v-if="message.report.report.previous_period"> · 对比 {{ message.report.report.previous_period.range_start }} 至 {{ message.report.report.previous_period.range_end }}</template></small></div><span v-if="message.report.report.data_quality?.latest_data_date">最新业务日 {{ message.report.report.data_quality.latest_data_date }}</span></div>
               <div v-if="reportDecisionQuality(message)?.modules?.length" class="ai-quality-strip"><article v-for="item in reportDecisionQuality(message)?.modules" :key="item.key" :class="`confidence-${item.confidence}`" :title="item.reason"><span>{{ item.label }}</span><strong>{{ confidenceText(item.confidence) }}</strong></article></div>
-              <section v-if="reportDailyRows(message).length" class="ai-report-section"><div class="ai-section-title"><strong>逐日经营明细</strong><small>{{ reportDailyRows(message).length }} 天 · 支付金额口径</small></div><div class="ai-report-table-wrap"><table class="ai-report-table"><thead><tr><th>业务日</th><th>GMV</th><th>访客</th><th>支付买家</th><th>转化率</th><th>退款金额</th><th>推广花费</th></tr></thead><tbody><tr v-for="row in reportDailyRows(message)" :key="row.stat_date"><td>{{ row.stat_date }}</td><td>{{ money(row.paid_amount) }}</td><td>{{ formatNumber(row.visitors) }}</td><td>{{ formatNumber(row.buyers) }}</td><td>{{ percent(row.conversion_rate) }}</td><td>{{ money(row.refund_amount) }}</td><td>{{ money(row.promotion_plan_spend) }}</td></tr></tbody></table></div></section>
+              <section v-if="message.report.report_type !== 'business_review' && reportDailyRows(message).length" class="ai-report-section"><div class="ai-section-title"><strong>逐日经营明细</strong><small>{{ reportDailyRows(message).length }} 天 · 支付金额口径</small></div><div class="ai-report-table-wrap"><table class="ai-report-table"><thead><tr><th>业务日</th><th>GMV</th><th>访客</th><th>支付买家</th><th>转化率</th><th>退款金额</th><th>推广花费</th></tr></thead><tbody><tr v-for="row in reportDailyRows(message)" :key="row.stat_date"><td>{{ row.stat_date }}</td><td>{{ money(row.paid_amount) }}</td><td>{{ formatNumber(row.visitors) }}</td><td>{{ formatNumber(row.buyers) }}</td><td>{{ percent(row.conversion_rate) }}</td><td>{{ money(row.refund_amount) }}</td><td>{{ money(row.promotion_plan_spend) }}</td></tr></tbody></table></div></section>
               <div class="ai-report-kpis ai-report-kpis-expanded">
-                <article><small>GMV</small><strong>{{ money(reportOps(message).gmv) }}</strong><em :class="reportChangeClass(message, 'paid_amount')">{{ reportChangeText(message, 'paid_amount') }}</em></article>
-                <article><small>去退 GMV</small><strong>{{ money(reportOps(message).net_gmv) }}</strong><em>退款后口径</em></article>
+                <article><small>支付金额</small><strong>{{ money(reportOps(message).gmv) }}</strong><em :class="reportChangeClass(message, 'paid_amount')">{{ reportComparisonLabel(message) }} {{ reportChangeText(message, 'paid_amount') }}</em></article>
+                <article><small>退款后金额</small><strong>{{ money(reportOps(message).net_gmv) }}</strong><em>支付金额 - 退款金额</em></article>
                 <article><small>退款金额占比</small><strong>{{ percent(reportOps(message).refund_rate) }}</strong><em :class="reportChangeClass(message, 'paid_amount')">金额 {{ money(reportOps(message).refund_amount) }}</em></article>
-                <article><small>访客 UV</small><strong>{{ formatNumber(reportOps(message).visitors) }}</strong><em :class="reportChangeClass(message, 'visitors')">{{ reportChangeText(message, 'visitors') }}</em></article>
-                <article><small>支付买家</small><strong>{{ formatNumber(reportOps(message).buyers) }}</strong><em :class="reportChangeClass(message, 'buyers')">{{ reportChangeText(message, 'buyers') }}</em></article>
-                <article><small>支付转化率</small><strong>{{ percent(reportOps(message).conversion_rate) }}</strong><em :class="reportChangeClass(message, 'conversion_rate')">{{ reportChangeText(message, 'conversion_rate') }}</em></article>
-                <article><small>客单价</small><strong>¥{{ formatNumber(reportOps(message).customer_unit_price, 2) }}</strong><em :class="reportChangeClass(message, 'customer_unit_price')">{{ reportChangeText(message, 'customer_unit_price') }} · 支付金额 ÷ 支付买家</em></article>
-                <article><small>新客支付占比</small><strong>{{ percent(reportOps(message).new_customer_buyer_share) }}</strong><em>新客买家 ÷ 支付买家</em></article>
+                <article><small>访客 UV</small><strong>{{ formatNumber(reportOps(message).visitors) }}</strong><em :class="reportChangeClass(message, 'visitors')">{{ reportComparisonLabel(message) }} {{ reportChangeText(message, 'visitors') }}</em></article>
+                <article><small>支付买家</small><strong>{{ formatNumber(reportOps(message).buyers) }}</strong><em :class="reportChangeClass(message, 'buyers')">{{ reportComparisonLabel(message) }} {{ reportChangeText(message, 'buyers') }}</em></article>
+                <article><small>支付转化率</small><strong>{{ percent(reportOps(message).conversion_rate) }}</strong><em :class="reportChangeClass(message, 'conversion_rate')">{{ reportComparisonLabel(message) }} {{ reportChangeText(message, 'conversion_rate') }}</em></article>
+                <article><small>客单价</small><strong>¥{{ formatNumber(reportOps(message).customer_unit_price, 2) }}</strong><em :class="reportChangeClass(message, 'customer_unit_price')">{{ reportComparisonLabel(message) }} {{ reportChangeText(message, 'customer_unit_price') }} · 支付金额 ÷ 支付买家</em></article>
+                <article><small>新客买家占比</small><strong>{{ percent(reportOps(message).new_customer_buyer_share) }}</strong><em>新客买家 ÷ 支付买家</em></article>
               </div>
-              <div v-if="message.report.report.target" class="ai-report-target"><div><small>销售目标</small><strong>{{ money(message.report.report.target.target_gmv) }}</strong></div><div><small>当前完成率</small><strong>{{ percent(message.report.report.target.completion_rate) }}</strong></div><div><small>时间进度</small><strong>{{ percent(message.report.report.target.time_progress) }}</strong></div><div><small>进度差</small><strong :class="Number(message.report.report.target.pace_gap || 0) < 0 ? 'down' : 'up'">{{ message.report.report.target.pace_gap == null ? '--' : `${Number(message.report.report.target.pace_gap) >= 0 ? '+' : ''}${formatNumber(message.report.report.target.pace_gap, 1)} 个百分点` }}</strong></div><div v-if="message.report.report.target.remaining_days"><small>剩余目标</small><strong>{{ money(message.report.report.target.remaining_gmv) }}</strong><em>剩余 {{ message.report.report.target.remaining_days }} 天 · 日均 {{ money(message.report.report.target.required_daily_gmv) }}</em></div></div>
-              <section v-if="reportDiagnosis(message)" class="ai-report-section ai-report-summary"><div class="ai-section-title"><strong>今日结论</strong><small>先看结果，再看原因</small></div><h3>{{ reportDiagnosis(message)?.headline }}</h3><p>{{ reportDiagnosis(message)?.summary }}</p></section>
-              <section v-if="reportDriverRows(message).length" class="ai-report-section ai-driver-section"><div class="ai-section-title"><strong>GMV 变化驱动</strong><small>影响金额合计回勾 GMV 差额</small></div><div class="ai-driver-bridge"><article v-for="row in reportDriverRows(message)" :key="row.key" :class="Number(row.impact_amount) < 0 ? 'negative' : 'positive'"><div><span>{{ row.label }}</span><small>{{ row.change_percent == null ? '无可比环比' : `${Number(row.change_percent) >= 0 ? '+' : ''}${formatNumber(row.change_percent, 1)}%` }}</small></div><strong>{{ signedMoney(row.impact_amount) }}</strong></article></div><p>{{ reportDriverBridge(message)?.note }}</p></section>
+              <div v-if="message.report.report.target" class="ai-report-target"><div><small>支付目标</small><strong>{{ money(message.report.report.target.target_gmv) }}</strong></div><div><small>当前完成率</small><strong>{{ percent(message.report.report.target.completion_rate) }}</strong></div><div><small>时间进度</small><strong>{{ percent(message.report.report.target.time_progress) }}</strong></div><div><small>进度差</small><strong :class="Number(message.report.report.target.pace_gap || 0) < 0 ? 'down' : 'up'">{{ message.report.report.target.pace_gap == null ? '--' : `${Number(message.report.report.target.pace_gap) >= 0 ? '+' : ''}${formatNumber(message.report.report.target.pace_gap, 1)} 个百分点` }}</strong></div><div v-if="message.report.report.target.remaining_days"><small>剩余目标</small><strong>{{ money(message.report.report.target.remaining_gmv) }}</strong><em>剩余 {{ message.report.report.target.remaining_days }} 天 · 日均 {{ money(message.report.report.target.required_daily_gmv) }}</em></div></div>
+              <section v-if="reportDiagnosis(message)" class="ai-report-section ai-report-summary"><div class="ai-section-title"><strong>{{ message.report.report_type === 'business_review' ? '经营结论' : '今日结论' }}</strong><small>先看结果，再看原因</small></div><h3>{{ reportDiagnosis(message)?.headline }}</h3><p>{{ reportDiagnosis(message)?.summary }}</p></section>
+              <section v-if="reportDriverRows(message).length" class="ai-report-section ai-driver-section"><div class="ai-section-title"><strong>支付金额变化驱动</strong><small>影响金额合计回勾支付金额差额</small></div><div class="ai-driver-bridge"><article v-for="row in reportDriverRows(message)" :key="row.key" :class="Number(row.impact_amount) < 0 ? 'negative' : 'positive'"><div><span>{{ row.label }}</span><small>{{ row.change_percent == null ? `无可比${reportComparisonLabel(message)}` : `${Number(row.change_percent) >= 0 ? '+' : ''}${formatNumber(row.change_percent, 1)}%` }}</small></div><strong>{{ signedMoney(row.impact_amount) }}</strong></article></div><p>{{ reportDriverBridge(message)?.note }}</p></section>
+              <section v-if="message.report.report_type === 'business_review' && reportBusinessEvents(message).length" class="ai-report-section management-event-section"><div class="ai-section-title"><strong>经营事件</strong><small>人工输入 · 仅用于辅助解释</small></div><div class="management-event-list"><span v-for="item in reportBusinessEvents(message)" :key="item">{{ item }}</span></div></section>
+              <section v-if="message.report.report_type === 'business_review' && managementTrendOption(message)" class="ai-report-section"><div class="ai-section-title"><strong>月度支付趋势</strong><small>支付与退款后口径并列</small></div><BusinessChart :option="managementTrendOption(message)!" ariaLabel="经营复盘月度趋势" :height="300" /></section>
+              <section v-if="message.report.report_type === 'business_review' && reportManagementSections(message).length" class="ai-report-section management-module-section"><div class="ai-section-title"><strong>原因与结构</strong><small>展开查看全量汇总</small></div><details v-for="section in reportManagementSections(message)" :key="section.key" class="management-review-detail"><summary><span>{{ section.label }}</span><small>{{ section.rows.length }} 项</small><ChevronRight :size="15" /></summary><div class="ai-report-table-wrap"><table class="ai-report-table"><thead><tr><th v-for="column in reviewColumns(section.rows)" :key="column">{{ column }}</th></tr></thead><tbody><tr v-for="(row, index) in section.rows" :key="index"><td v-for="column in reviewColumns(section.rows)" :key="column">{{ reviewCell(column, row[column]) }}</td></tr></tbody></table></div></details></section>
+              <section v-if="message.report.report_type === 'business_review' && reportPlanning(message).validation?.length" class="ai-report-section ai-report-quality"><div class="ai-section-title"><strong>规划目标校验</strong><small>人工输入 · 系统回勾</small></div><p v-for="item in reportPlanning(message).validation" :key="item['校验']" :class="`check-${item.status}`"><strong>{{ item['校验'] }}</strong> · {{ item.detail }}</p></section>
+              <section v-if="message.report.report_type === 'business_review' && (reportIntegrityChecks(message).length || reportSourceLedger(message).length)" class="ai-report-section management-audit-section"><div class="ai-section-title"><strong>口径与来源</strong><small>报告可追溯</small></div><div class="management-integrity-list"><span v-for="item in reportIntegrityChecks(message)" :key="item.check" :class="`is-${item.status}`"><CheckCircle2 v-if="item.status === 'passed'" :size="13" /><TriangleAlert v-else :size="13" />{{ item.check }}</span></div><div class="ai-report-table-wrap"><table class="ai-report-table"><thead><tr><th>章节</th><th>来源类型</th><th>数据源</th><th>口径规则</th></tr></thead><tbody><tr v-for="item in reportSourceLedger(message)" :key="`${item.section}-${item.source_type}`"><td>{{ item.section }}</td><td><span :class="`source-type source-${item.source_type}`">{{ item.source_type }}</span></td><td>{{ item.source }}</td><td>{{ item.rule }}</td></tr></tbody></table></div></section>
               <section v-if="message.report.provider !== 'rules' && cleanReportNarrative(message.report.text) && cleanReportNarrative(message.report.text) !== reportDiagnosis(message)?.summary" class="ai-report-section ai-report-narrative"><div class="ai-section-title"><strong>AI 补充判断</strong><small>{{ message.report.model }} · 不复述页面表格</small></div><div class="ai-answer ai-markdown-content" v-html="renderReportNarrative(message.report.text)"></div></section>
-              <section v-if="reportDiagnosis(message)?.actions?.length" class="ai-report-section"><div class="ai-section-title"><strong>今日动作</strong><small>按优先级执行</small></div><div class="ai-report-actions"><article v-for="action in reportDiagnosis(message)?.actions.slice(0, 5) || []" :key="`${action.priority}-${action.title}`"><b>{{ action.priority }}</b><div><strong>{{ action.title }}</strong><span>{{ action.detail }}</span><small>验证：{{ action.validation || '--' }}</small></div></article></div><div v-if="nextQuestions(message).length" class="ai-question-chips"><button v-for="item in nextQuestions(message).slice(0, 4)" :key="item" type="button" @click="useQuestion(item)">{{ item }}</button></div></section>
+              <section v-if="reportDiagnosis(message)?.actions?.length" class="ai-report-section"><div class="ai-section-title"><strong>{{ message.report.report_type === 'business_review' ? '建议动作' : '今日动作' }}</strong><small>按优先级执行</small></div><div class="ai-report-actions"><article v-for="action in reportDiagnosis(message)?.actions.slice(0, 5) || []" :key="`${action.priority}-${action.title}`"><b>{{ action.priority }}</b><div><strong>{{ action.title }}</strong><span>{{ action.detail }}</span><small>验证：{{ action.validation || '--' }}</small></div></article></div><div v-if="nextQuestions(message).length" class="ai-question-chips"><button v-for="item in nextQuestions(message).slice(0, 4)" :key="item" type="button" @click="useQuestion(item)">{{ item }}</button></div></section>
               <section v-if="reportDiagnosis(message)?.findings?.length" class="ai-report-section"><div class="ai-section-title"><strong>问题定位</strong><small>{{ reportDiagnosis(message)?.findings.length }} 项判断</small></div><div class="ai-report-findings"><article v-for="finding in reportDiagnosis(message)?.findings.slice(0, 5) || []" :key="finding.title" :class="`level-${finding.level}`"><strong>{{ finding.title }}</strong><span>{{ finding.detail }}</span></article></div></section>
               <section v-if="reportChannelRows(message).length" class="ai-report-section"><div class="ai-section-title"><strong>渠道成交标签</strong><small>各自以店铺 GMV 为分母 · 不可相加</small></div><p v-if="reportChannelScope(message)" class="ai-scope-note"><TriangleAlert :size="13" />{{ reportChannelScope(message)?.note }}</p><div class="ai-report-table-wrap"><table class="ai-report-table"><thead><tr><th>渠道/标签</th><th>成交金额</th><th>销售占比</th><th>已知费用</th><th>状态</th></tr></thead><tbody><tr v-for="row in reportChannelRows(message)" :key="row.key"><td>{{ row.label }}</td><td>{{ money(row.paid_amount) }}</td><td>{{ percent(row.sales_share) }}</td><td>{{ row.expense == null ? '--' : money(row.expense) }}</td><td><span class="ai-table-status">可用</span></td></tr></tbody></table></div></section>
               <section v-if="reportPromotionRows(message).length" class="ai-report-section"><div class="ai-section-title"><strong>推广投入产出</strong><small>15 天归因窗口 · 归因成交不等于因果增量</small></div><div class="ai-report-table-wrap"><table class="ai-report-table"><thead><tr><th>场景</th><th>花费</th><th>归因成交</th><th>ROI</th><th>直接/间接成交</th></tr></thead><tbody><tr v-for="row in reportPromotionRows(message).slice(0, 8)" :key="row.display_name" :class="{ 'is-low-efficiency': row.roi_value < 1 }"><td>{{ row.display_name }}</td><td>{{ money(row.spend_value) }}</td><td>{{ money(row.gmv_value) }}</td><td><strong>{{ formatNumber(row.roi_value, 2) }}</strong></td><td>{{ money(row.direct_paid_amount) }} / {{ money(row.indirect_paid_amount) }}</td></tr></tbody></table></div></section>
               <section v-if="reportTalentRows(message).length" class="ai-report-section"><div class="ai-section-title"><strong>直播 / 达人贡献</strong><small>缺少完整佣金时不判断盈利</small></div><div class="ai-report-table-wrap"><table class="ai-report-table"><thead><tr><th>达人</th><th>成交金额</th><th>合作场次</th><th>支付买家</th><th>单场 GMV</th><th>单买家产出</th></tr></thead><tbody><tr v-for="row in reportTalentRows(message)" :key="row.name"><td>{{ row.name || '--' }}</td><td>{{ money(row.gmv) }}</td><td>{{ formatNumber(row.sessions) }}</td><td>{{ formatNumber(row.buyers) }}</td><td>{{ row.sessions ? money(Number(row.gmv || 0) / Number(row.sessions)) : '--' }}</td><td>{{ row.buyers ? `¥${formatNumber(Number(row.gmv || 0) / Number(row.buyers), 2)}` : '--' }}</td></tr></tbody></table></div></section>
-              <section v-if="reportQuality(message).missingSections.length || reportQuality(message).noDataSections.length || reportQuality(message).missingDates.length || reportQuality(message).missingDatasets.length || reportQuality(message).partialDatasets.length || reportQuality(message).failedDatasets.length || reportQuality(message).noDataDatasets.length || message.report.warnings.length" class="ai-report-section ai-report-quality"><div class="ai-section-title"><strong>数据状态</strong><small>不把缺失数据当作 0</small></div><p v-if="reportQuality(message).missingSections.length">待补采模块：{{ reportQuality(message).missingSections.join('、') }}</p><p v-if="reportQuality(message).missingDatasets.length">待补采数据集：{{ reportQuality(message).missingDatasets.join('、') }}</p><p v-if="reportQuality(message).partialDatasets.length">部分覆盖：{{ reportQuality(message).partialDatasets.join('、') }}</p><p v-if="reportQuality(message).failedDatasets.length">采集失败：{{ reportQuality(message).failedDatasets.join('、') }}</p><p v-if="reportQuality(message).noDataSections.length">平台无数据模块：{{ reportQuality(message).noDataSections.join('、') }}</p><p v-if="reportQuality(message).noDataDatasets.length">平台无数据集：{{ reportQuality(message).noDataDatasets.join('、') }}</p><p v-if="reportQuality(message).missingDates.length">缺失日期：{{ reportQuality(message).missingDates.join('、') }}</p><p v-for="warning in message.report.warnings" :key="warning">{{ warning }}</p></section>
+              <section v-if="reportQuality(message).missingSections.length || reportQuality(message).noDataSections.length || reportQuality(message).missingDates.length || reportQuality(message).missingDatasets.length || reportQuality(message).partialDatasets.length || reportQuality(message).failedDatasets.length || reportQuality(message).noDataDatasets.length || reportComparisonQuality(message).missing_dates?.length || reportComparisonQuality(message).missing_datasets?.length || reportComparisonQuality(message).partial_datasets?.length || message.report.warnings.length" class="ai-report-section ai-report-quality"><div class="ai-section-title"><strong>数据状态</strong><small>本期与对比期分别审计 · 缺失不按 0</small></div><p v-if="reportQuality(message).missingSections.length">本期待补采模块：{{ reportQuality(message).missingSections.join('、') }}</p><p v-if="reportQuality(message).missingDatasets.length">本期待补采数据集：{{ reportQuality(message).missingDatasets.join('、') }}</p><p v-if="reportQuality(message).partialDatasets.length">本期部分覆盖：{{ reportQuality(message).partialDatasets.join('、') }}</p><p v-if="reportQuality(message).failedDatasets.length">本期采集失败：{{ reportQuality(message).failedDatasets.join('、') }}</p><p v-if="reportQuality(message).noDataSections.length">本期平台无数据模块：{{ reportQuality(message).noDataSections.join('、') }}</p><p v-if="reportQuality(message).noDataDatasets.length">本期平台无数据集：{{ reportQuality(message).noDataDatasets.join('、') }}</p><p v-if="reportQuality(message).missingDates.length">本期缺失日期：{{ dateListText(reportQuality(message).missingDates) }}</p><p v-if="reportComparisonQuality(message).missing_datasets?.length">对比期待补采数据集：{{ reportComparisonQuality(message).missing_datasets?.join('、') }}</p><p v-if="reportComparisonQuality(message).partial_datasets?.length">对比期部分覆盖：{{ reportComparisonQuality(message).partial_datasets?.join('、') }}</p><p v-if="reportComparisonQuality(message).missing_dates?.length">对比期缺失日期：{{ dateListText(reportComparisonQuality(message).missing_dates) }}</p><p v-for="warning in message.report.warnings" :key="warning">{{ warning }}</p></section>
             </template>
-            <footer v-if="!message.loading" class="ai-message-meta"><Clock3 :size="12" />{{ messageTime(message.createdAt) }}<span v-if="message.elapsedMs != null && !isGeneralChatMessage(message)">· 分析耗时 {{ elapsedText(message.elapsedMs) }}</span><span v-if="message.analysis && !isGeneralChatMessage(message)">· {{ message.analysis.provider === "rules" ? "规则引擎" : message.analysis.model }}</span><span v-if="message.report">· 保留口径与覆盖提示</span></footer>
+            <footer v-if="!message.loading" class="ai-message-meta"><Clock3 :size="12" />{{ messageTime(message.createdAt) }}<span v-if="message.elapsedMs != null && !isGeneralChatMessage(message)">· 分析耗时 {{ elapsedText(message.elapsedMs) }}</span><span v-if="message.analysis && !isGeneralChatMessage(message)">· {{ analysisPlan(message) ? "证据 Agent" : message.analysis.provider === "rules" ? "规则引擎" : message.analysis.model }}</span><span v-if="message.report">· 保留口径与覆盖提示</span></footer>
           </div></div>
         </template>
       </main>

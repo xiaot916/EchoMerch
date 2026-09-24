@@ -1,0 +1,31 @@
+{
+  "name": "promotion-intel",
+  "display_name": "推广智能诊断",
+  "description": "基于 30 日实测基线的推广智能诊断与优化方案生成器：词价越界、溢价反噬、裸投高消耗、智能定向漏点、词包挤压、渠道门槛失配六条硬规则",
+  "version": "1.0.0",
+  "domains": ["promotion", "analytics"],
+  "tools": [
+    "data.query",
+    "promotion.diagnose",
+    "promotion.build_plan"
+  ],
+  "workflow": [
+    { "tool": "data.query", "note": "拉 store_daily_promotion_campaigns / crowds / words / word_packages 最近 30 天" },
+    { "tool": "promotion.diagnose", "note": "喂 6 条硬规则诊断器，输出 Finding 列表" },
+    { "tool": "promotion.build_plan", "note": "诊断 → OptimizationPlan（draft 状态）" }
+  ],
+  "enabled": true,
+  "keywords": [
+    "推广诊断", "词价", "溢价", "智能定向", "流量智选", "渠道门槛",
+    "保本ROI", "回滚", "优化计划", "止血", "拉新计划", "词包",
+    "推广场景", "推广计划", "推广单元", "人群包", "达摩盘"
+  ],
+  "diagnosis_rules": {
+    "word_price_bounds": "custom_bid 场景词价偏离保本CPC×[0.7,1.3]区间",
+    "premium_backfire": "人群溢价 >100% 且 ROI < 保本线",
+    "bare_traffic_share": "crowdType=-999（无定向）花费占账户 >50%",
+    "smart_targeting_leak": "crowdType=100（智能定向）花费 >1万且 ROI < 1",
+    "word_package_squeeze": "词包花费占比 >60% 且手动词 ROI 领先",
+    "channel_threshold_mismatch": "达摩盘包规模与 49/74/33/113 渠道门槛不匹配"
+  }
+}

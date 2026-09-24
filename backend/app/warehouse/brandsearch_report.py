@@ -78,7 +78,18 @@ def load_and_parse(
     fallback_platform_store_id: str = DEFAULT_PLATFORM_STORE_ID,
 ) -> ParsedBrandSearchReport:
     raw = path.read_bytes()
-    payload = json.loads(raw.decode("utf-8"))
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        head = raw[:200].decode("utf-8", errors="replace").lstrip().lower()
+        if head.startswith("<!doctype") or "<html" in head:
+            raise BrandSearchPayloadError(
+                "品销宝报表接口返回了登录页 HTML 而不是 JSON（会话已失效）。"
+                "请在采集浏览器中重新打开品销宝品牌专区并完成登录后重试。"
+            ) from exc
+        raise BrandSearchPayloadError(
+            f"品销宝报表响应不是有效 JSON（前 80 字节: {raw[:80].decode('utf-8', errors='replace')!r}）。"
+        ) from exc
     return parse_payload(
         payload,
         business_day=business_day,
@@ -93,6 +104,8 @@ def parse_payload(
     raw: bytes | None = None,
     fallback_platform_store_id: str = DEFAULT_PLATFORM_STORE_ID,
 ) -> ParsedBrandSearchReport:
+    if not isinstance(payload, dict):
+        raise BrandSearchPayloadError("The PZ brand-search response is not a JSON object.")
     data = payload.get("data")
     report = data.get("rptQueryResp") if isinstance(data, dict) else None
     rows = report.get("rptDataDaily") if isinstance(report, dict) else None

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
-from app.core.business_days import SHANGHAI_TZ, yesterday_in_shanghai
+from app.core.business_days import SHANGHAI_TZ, today_in_shanghai, yesterday_in_shanghai
 from app.core.config import PROJECT_ROOT, settings
 from app.core.local_database import (
     BUSINESS_DAY,
@@ -35,6 +35,8 @@ from app.modules.collection.registry import (
     COVERAGE_SNAPSHOT_DATASET_NAMES,
     CollectionDataset,
 )
+from app.modules.collection.dates import CURRENT_DAY_ONLY_DATASETS, validate_collection_day
+from app.modules.collection.snapshot_quality import current_price_snapshot_error
 from app.modules.collection.locks import active_feedback_run
 from app.modules.collection.coverage import (
     DEFAULT_COVERAGE_WINDOW_DAYS,
@@ -114,6 +116,9 @@ class CollectionService:
         resume_from_latest: bool = False,
     ) -> CollectionBatch:
         names = self._validate_dataset_names(dataset_names)
+        if not dataset_names and business_day != today_in_shanghai():
+            names = [name for name in names if name not in CURRENT_DAY_ONLY_DATASETS]
+        validate_collection_day(names, business_day)
         feedback_run = active_feedback_run(self.database_path)
         if feedback_run is not None:
             feedback_label, run_id = feedback_run
@@ -175,9 +180,14 @@ class CollectionService:
             "--datasets", ",".join(command_names),
             "--session-source", session_source,
             "--database-path", str(self.database_path),
+            "--timeout", "900",
         ]
+        # Keep in sync with ``scripts/collect_daily.py::PROMOTION_DATASET_NAMES``:
+        # a dataset only gets the rolling refresh when it is listed on both
+        # sides (the flag must be passed AND the dataset must opt in).
         if any(name in {
             "cps_overviews",
+            "cps_items",
             "brandsearch_reports",
             "alimama_campaigns",
             "alimama_crowds",
@@ -284,6 +294,26 @@ class CollectionService:
         target_day = current.date() - timedelta(days=1)
         if schedule.last_triggered_day == target_day.isoformat():
             return None
+        selected_names = list(schedule.dataset_names)
+        snapshot_names = [name for name in selected_names if name in CURRENT_DAY_ONLY_DATASETS]
+        report_names = [name for name in selected_names if name not in CURRENT_DAY_ONLY_DATASETS]
+        if snapshot_names and not self._snapshot_attempted_today(current.date()):
+            try:
+                batch = self.start_batch(
+                    business_day=current.date(),
+                    dataset_names=snapshot_names,
+                    session_source=schedule.session_source,
+                    refresh_existing=True,
+                    trigger="schedule",
+                )
+            except CollectionBatchConflict:
+                return None
+            if report_names:
+                return batch
+            self._mark_schedule_triggered(target_day, current)
+            return batch
+        if not report_names:
+            return None
         # Daily collection resumes from each dataset's own completed coverage,
         # rather than assuming that a dataset complete on ``target_day`` has
         # no historical gap.  The child planner keeps this bounded and also
@@ -293,15 +323,14 @@ class CollectionService:
             item for item in coverage.datasets
             if item.status not in {"complete", "no_data"}
         ]
-        selected_names = list(schedule.dataset_names)
         refresh_existing = any(
-            item.key in selected_names and item.status == "partial"
+            item.key in report_names and item.status == "partial"
             for item in attention_items
         )
         try:
             batch = self.start_batch(
                 business_day=target_day,
-                dataset_names=selected_names,
+                dataset_names=report_names,
                 session_source=schedule.session_source,
                 refresh_existing=refresh_existing,
                 trigger="schedule",
@@ -309,6 +338,21 @@ class CollectionService:
             )
         except CollectionBatchConflict:
             return None
+        self._mark_schedule_triggered(target_day, current)
+        return batch
+
+    def _snapshot_attempted_today(self, today: date) -> bool:
+        with self.database.connect() as conn:
+            rows = conn.execute(
+                "select dataset_names_json from collection_batches where business_day = ?",
+                (today.isoformat(),),
+            ).fetchall()
+            return any(
+                CURRENT_DAY_ONLY_DATASETS.intersection(json.loads(row[0]))
+                for row in rows
+            )
+
+    def _mark_schedule_triggered(self, target_day: date, current: datetime) -> None:
         with self.database.connect(read_only=False) as conn:
             conn.execute(
                 """
@@ -322,7 +366,6 @@ class CollectionService:
                 ),
             )
             conn.commit()
-        return batch
 
     def _dataset_coverage(self, conn, dataset: CollectionDataset, day: date) -> DatasetCoverage:
         table_states = [
@@ -390,6 +433,11 @@ class CollectionService:
             and any(table.raw_row_count > 0 and not table.present for table in table_states)
         ):
             error = error or "客户概览接口已返回占位行，但新访、回访或复购核心指标为空，尚未形成完整日报。"
+        if (
+            dataset.key == "sycm_home_board"
+            and any(table.raw_row_count > 0 and not table.present for table in table_states)
+        ):
+            error = error or "首页看板已有响应，但体验分或主营类目缺失，尚未形成完整日报。"
 
         # A successful component report can have no rows by design, such as a
         # date with promotion adgroups but no bidwords. Dataset registration
@@ -448,15 +496,9 @@ class CollectionService:
             status = "complete"
         elif present_count:
             status = "partial"
-        elif (
-            dataset.key == "sycm_new_customer_discount"
-            and any(table.status == "partial" for table in table_states)
-        ):
-            status = "partial"
-        elif (
-            dataset.key in {"sycm_customer_overviews", "sycm_new_customer_discount"}
-            and any(table.status == "partial" for table in table_states)
-        ):
+        elif dataset.key in {
+            "sycm_customer_overviews", "sycm_new_customer_discount", "sycm_home_board"
+        } and any(table.status == "partial" for table in table_states):
             status = "partial"
         elif any(value.endswith("failed") for value in statuses):
             status = "failed"
@@ -466,7 +508,7 @@ class CollectionService:
             status = "missing"
 
         audit = None
-        if hasattr(conn, "execute"):
+        if hasattr(conn, "execute") and dataset.key not in CURRENT_DAY_ONLY_DATASETS:
             try:
                 audit = audit_dataset_coverage(
                     conn,
@@ -489,6 +531,12 @@ class CollectionService:
                 status = "partial"
                 gap_range = self._format_gap_dates(audit.gap_dates)
                 error = f"近 {DEFAULT_COVERAGE_WINDOW_DAYS} 日存在连续覆盖缺口：{gap_range}；已纳入下次补采。"
+
+        if dataset.key == "taobao_operational_snapshots" and (settings.default_store_id or 1) == 1:
+            snapshot_error = current_price_snapshot_error(self.database_path, day)
+            if snapshot_error and status != "collecting":
+                status = "partial" if any(table.raw_row_count for table in table_states) else "failed"
+                error = snapshot_error
 
         # A later successful ingestion is authoritative for the coverage
         # view. Keep prior task failures in the run history, but do not attach
@@ -589,6 +637,31 @@ class CollectionService:
         table: str,
         day: date,
     ) -> DatasetTableCoverage:
+        if dataset.key == "sycm_activity_calendar":
+            exists = conn.execute(
+                "select 1 from sqlite_master where type = 'table' and name = ?", (table,)
+            ).fetchone()
+            if exists is None:
+                return DatasetTableCoverage(table=table, present=False, status="missing")
+            year_start, year_end = f"{day.year}-01-01", f"{day.year}-12-31"
+            row = conn.execute(
+                f"select count(*) as row_count from {q(table)} "
+                f"where {q(STORE_ID)} = ? and {q(BUSINESS_DAY)} between ? and ?",
+                (settings.default_store_id or 1, year_start, year_end),
+            ).fetchone()
+            latest = conn.execute(
+                f"select max(d.{q(BUSINESS_DAY)}) as latest_date from crawl_run_days d "
+                f"join crawl_runs r on r.{q(CRAWL_RUN_ID)} = d.{q(CRAWL_RUN_ID)} "
+                f"where d.{q(STORE_ID)} = ? and r.{q(CRAWL_TASK_TYPE)} = ? "
+                f"and d.{q(DAY_STATUS)} = 'ingested' and d.{q(BUSINESS_DAY)} between ? and ?",
+                (settings.default_store_id or 1, "sycm_activity_calendar", year_start, year_end),
+            ).fetchone()
+            count = int(row["row_count"] or 0)
+            return DatasetTableCoverage(
+                table=table, present=count > 0, row_count=count, raw_row_count=count,
+                latest_date=str(latest["latest_date"]) if latest and latest["latest_date"] else None,
+                status="complete" if count else "missing",
+            )
         if dataset.scope == "store":
             return self._table_coverage(conn, table, day)
         exists = conn.execute(
@@ -809,14 +882,16 @@ class CollectionService:
                 next_run_at=None,
             )
         configured_names = json.loads(row["dataset_names_json"])
-        # Migrate schedules created before the activity-calendar dataset was
-        # registered.  Keep intentionally narrowed schedules unchanged.
-        legacy_default_names = set(COLLECTION_DATASET_KEYS) - {"sycm_activity_calendar"}
-        if (
-            "sycm_activity_calendar" not in configured_names
-            and set(configured_names) == legacy_default_names
-        ):
-            configured_names.append("sycm_activity_calendar")
+        # Migrate schedules created before a dataset was registered: when the
+        # stored list is exactly the previous full default, add the datasets
+        # that were introduced later.  Intentionally narrowed schedules
+        # (a custom subset) are left unchanged.
+        later_dataset_names = ("sycm_activity_calendar", "cps_items")
+        missing_names = [
+            name for name in later_dataset_names if name not in configured_names
+        ]
+        if missing_names and set(configured_names) == set(COLLECTION_DATASET_KEYS) - set(missing_names):
+            configured_names = configured_names + missing_names
         active_names = [
             name for name in configured_names
             if name in COLLECTION_DATASET_BY_KEY

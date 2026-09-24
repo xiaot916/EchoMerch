@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue"
-import { AlertTriangle, CheckCircle2, Eye, EyeOff, FileLock2, KeyRound, LoaderCircle, RefreshCw, Save, ShieldCheck } from "lucide-vue-next"
+import { AlertTriangle, CheckCircle2, Eye, EyeOff, ExternalLink, FileLock2, KeyRound, LoaderCircle, QrCode, RefreshCw, Save, ShieldCheck, Store } from "lucide-vue-next"
 
-import { fetchCollectionSettings, testInventoryCredentials, updateInventoryCredentials } from "@/api"
-import type { CollectionSettings, InventoryCredentialStatus } from "@/types"
+import { fetchCollectionSettings, fetchSellerLoginStatus, fetchStores, openSellerLoginPage, testInventoryCredentials, updateInventoryCredentials } from "@/api"
+import type { CollectionSettings, InventoryCredentialStatus, SellerLoginStatus, StoreRecord } from "@/types"
 
 const settings = ref<CollectionSettings | null>(null)
 const loading = ref(false)
@@ -15,6 +15,10 @@ const refreshToken = ref("")
 const accessToken = ref("")
 const showRefreshToken = ref(false)
 const showAccessToken = ref(false)
+const sellerLogin = ref<SellerLoginStatus | null>(null)
+const stores = ref<StoreRecord[]>([])
+const sellerLoginLoading = ref(false)
+const sellerLoginError = ref("")
 
 const credentials = computed<InventoryCredentialStatus | null>(() => settings.value?.inventory_credentials || null)
 const credentialLabel = computed(() => {
@@ -30,13 +34,54 @@ async function load(): Promise<void> {
   loading.value = true
   error.value = ""
   try {
-    settings.value = await fetchCollectionSettings()
+    const [nextSettings, nextLogin, nextStores] = await Promise.all([
+      fetchCollectionSettings(),
+      fetchSellerLoginStatus(),
+      fetchStores(),
+    ])
+    settings.value = nextSettings
+    sellerLogin.value = nextLogin
+    stores.value = nextStores
   } catch (requestError) {
     error.value = requestError instanceof Error ? requestError.message : "采集设置暂不可用"
   } finally {
     loading.value = false
   }
 }
+
+async function openSellerLogin(): Promise<void> {
+  sellerLoginLoading.value = true
+  sellerLoginError.value = ""
+  try {
+    sellerLogin.value = await openSellerLoginPage()
+  } catch (requestError) {
+    sellerLoginError.value = requestError instanceof Error ? requestError.message : "千牛登录页打开失败"
+  } finally {
+    sellerLoginLoading.value = false
+  }
+}
+
+async function refreshSellerLogin(): Promise<void> {
+  sellerLoginError.value = ""
+  try {
+    sellerLogin.value = await fetchSellerLoginStatus()
+  } catch (requestError) {
+    sellerLoginError.value = requestError instanceof Error ? requestError.message : "登录状态读取失败"
+  }
+}
+
+const sellerLoginLabel = computed(() => {
+  switch (sellerLogin.value?.status) {
+    case "authenticated": return "已登录"
+    case "login_required": return "等待登录"
+    case "ready": return "待打开"
+    default: return "浏览器未连接"
+  }
+})
+const sellerPageHost = computed(() => {
+  if (!sellerLogin.value?.page_url) return ""
+  try { return new URL(sellerLogin.value.page_url).hostname } catch { return "" }
+})
 
 async function saveCredentials(): Promise<void> {
   if (!refreshToken.value.trim()) {
@@ -101,6 +146,28 @@ onMounted(() => { void load() })
       <article class="panel capture-stat"><span>凭据变量</span><strong>{{ settings.cookie_env }}</strong><small>只读取变量名</small></article>
     </section>
 
+    <section class="panel seller-session-panel">
+      <div class="panel-heading"><div><p>店铺身份与会话</p><h2>千牛店铺登录</h2></div><Store :size="18" /></div>
+      <div class="seller-session-grid">
+        <div class="seller-session-state" :class="`seller-${sellerLogin?.status || 'offline'}`">
+          <div class="seller-session-state-icon"><CheckCircle2 v-if="sellerLogin?.status === 'authenticated'" :size="19" /><QrCode v-else :size="19" /></div>
+          <div><strong>{{ sellerLoginLabel }}</strong><span>{{ sellerLogin?.detail || "正在读取登录状态。" }}</span><small v-if="sellerPageHost">当前页：{{ sellerPageHost }}</small></div>
+        </div>
+        <div class="seller-session-actions">
+          <button type="button" class="capture-refresh" :disabled="sellerLoginLoading" @click="openSellerLogin"><LoaderCircle v-if="sellerLoginLoading" :size="15" class="spinning" /><QrCode v-else :size="15" />{{ sellerLogin?.status === 'authenticated' ? '查看店铺会话' : '打开千牛登录' }}</button>
+          <button type="button" class="capture-refresh secondary-action" :disabled="sellerLoginLoading" @click="refreshSellerLogin"><RefreshCw :size="15" />刷新状态</button>
+          <a v-if="sellerLogin?.status !== 'authenticated'" class="seller-login-link" :href="sellerLogin?.login_url" target="_blank" rel="noreferrer"><ExternalLink :size="14" />备用打开方式</a>
+        </div>
+      </div>
+      <div v-if="sellerLoginError" class="collection-alert collection-alert-error"><AlertTriangle :size="16" /><span>{{ sellerLoginError }}</span></div>
+      <div class="seller-store-list">
+        <div class="seller-store-list-heading"><span>已识别店铺</span><small>{{ stores.length }} 个</small></div>
+        <div v-if="stores.length" class="seller-store-items"><div v-for="store in stores" :key="store.store_id" class="seller-store-item"><Store :size="15" /><div><strong>{{ store.store_name }}</strong><span>{{ store.platform_name }} · {{ store.platform_store_id || `店铺 ${store.store_id}` }}</span></div><em>{{ store.status || 'active' }}</em></div></div>
+        <p v-else class="seller-empty">登录并成功采集一次后，系统会从数据中识别店铺并显示在这里。</p>
+      </div>
+      <p class="seller-session-note">扫码或账号登录都在官方千牛页面完成。系统只复用独立采集浏览器的加密登录态，不保存明文密码、不截取二维码令牌；首次登录后，生意参谋、CPS、品销宝等业务域按需完成一次 SSO 建立会话。</p>
+    </section>
+
     <section class="panel inventory-credential-panel">
       <div class="panel-heading"><div><p>吉客云库存采集</p><h2>凭证状态与手动刷新</h2></div><KeyRound :size="18" /></div>
       <div class="credential-status-row">
@@ -127,6 +194,28 @@ onMounted(() => { void load() })
 
 <style scoped>
 .inventory-credential-panel { display: grid; gap: 14px; }
+.seller-session-panel { display: grid; gap: 14px; }
+.seller-session-grid { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center; }
+.seller-session-state { display: flex; align-items: center; gap: 10px; min-width: 0; border: 1px solid #e4ebe7; border-radius: 5px; padding: 12px 14px; background: #fbfdfc; }
+.seller-session-state-icon { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 50%; color: #956a1d; background: #fff9e9; }
+.seller-session-state.seller-authenticated .seller-session-state-icon { color: #19734a; background: #eff9f2; }
+.seller-session-state.seller-offline .seller-session-state-icon { color: #b24f4f; background: #fff3f3; }
+.seller-session-state strong, .seller-session-state span, .seller-session-state small { display: block; }
+.seller-session-state span, .seller-session-state small { margin-top: 3px; color: var(--text-muted); font-size: 12px; line-height: 1.45; }
+.seller-session-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 7px; }
+.seller-session-actions .capture-refresh { white-space: nowrap; }
+.seller-login-link { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); font-size: 12px; text-decoration: none; }
+.seller-store-list { display: grid; gap: 8px; }
+.seller-store-list-heading { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 12px; }
+.seller-store-list-heading small { color: var(--text-soft); }
+.seller-store-items { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 7px; }
+.seller-store-item { display: flex; min-width: 0; align-items: center; gap: 8px; border: 1px solid #e4ebe7; border-radius: 4px; padding: 9px 10px; color: var(--text-muted); }
+.seller-store-item > div { min-width: 0; flex: 1; }
+.seller-store-item strong, .seller-store-item span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.seller-store-item strong { color: var(--text); font-size: 12px; }
+.seller-store-item span { margin-top: 2px; font-size: 12px; }
+.seller-store-item em { color: #19734a; font-size: 12px; font-style: normal; }
+.seller-empty, .seller-session-note { margin: 0; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
 .credential-status-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 11px; border: 1px solid #e4ebe7; border-radius: 5px; padding: 12px 14px; background: #fbfdfc; }
 .credential-status-icon { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 50%; }
 .credential-status-icon.status-ready { color: #19734a; background: #eff9f2; }
@@ -134,12 +223,12 @@ onMounted(() => { void load() })
 .credential-status-icon.status-invalid { color: #b24f4f; background: #fff3f3; }
 .credential-status-icon.status-not_configured { color: #6e7d75; background: #f1f5f3; }
 .credential-status-row strong, .credential-status-row span, .credential-status-row small { display: block; }
-.credential-status-row span, .credential-status-row small { margin-top: 3px; color: var(--text-muted); font-size: 11px; line-height: 1.45; }
+.credential-status-row span, .credential-status-row small { margin-top: 3px; color: var(--text-muted); font-size: 12px; line-height: 1.45; }
 .credential-status-row small { margin-top: 0; text-align: right; white-space: nowrap; }
-.credential-facts { display: flex; flex-wrap: wrap; gap: 7px 18px; color: var(--text-muted); font-size: 11px; }
+.credential-facts { display: flex; flex-wrap: wrap; gap: 7px 18px; color: var(--text-muted); font-size: 12px; }
 .credential-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: end; gap: 10px; }
 .credential-form label { display: grid; gap: 5px; min-width: 0; }
-.credential-form label > span { color: var(--text-muted); font-size: 11px; }
+.credential-form label > span { color: var(--text-muted); font-size: 12px; }
 .credential-input-shell { display: flex; min-height: 36px; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 4px; padding-left: 9px; color: #98a2b3; background: #fff; }
 .credential-input-shell:focus-within { border-color: #6c8fea; box-shadow: 0 0 0 3px rgba(83, 120, 225, .12); }
 .credential-input-shell input { min-width: 0; min-height: 34px; flex: 1; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 12px; }
@@ -147,8 +236,8 @@ onMounted(() => { void load() })
 .credential-input-shell button:hover { color: var(--accent); }
 .credential-actions { display: flex; align-items: center; gap: 7px; }
 .credential-actions .capture-refresh { white-space: nowrap; }
-.credential-note { margin: 0; color: var(--text-muted); font-size: 10px; line-height: 1.6; }
+.credential-note { margin: 0; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
 .collection-alert-error { border-color: #efccc6; color: #b64d3e; background: #fff1ef; }
 @media (max-width: 900px) { .credential-form { grid-template-columns: 1fr 1fr; } .credential-actions { grid-column: 1 / -1; } }
-@media (max-width: 620px) { .credential-status-row { grid-template-columns: auto minmax(0, 1fr); } .credential-status-row small { grid-column: 2; text-align: left; } .credential-form { grid-template-columns: 1fr; } .credential-actions { grid-column: auto; flex-wrap: wrap; } }
+@media (max-width: 620px) { .credential-status-row { grid-template-columns: auto minmax(0, 1fr); } .credential-status-row small { grid-column: 2; text-align: left; } .credential-form { grid-template-columns: 1fr; } .credential-actions { grid-column: auto; flex-wrap: wrap; } .seller-session-grid { grid-template-columns: 1fr; } .seller-session-actions { justify-content: flex-start; } }
 </style>

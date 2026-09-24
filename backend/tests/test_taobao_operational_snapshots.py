@@ -19,7 +19,9 @@ from app.core.local_database import (  # noqa: E402
 )
 from app.warehouse.store import WarehouseStore  # noqa: E402
 from app.warehouse.taobao_activity_item_snapshots import parse_payload as parse_activity  # noqa: E402
-from app.warehouse.taobao_current_price_items import parse_payload as parse_current  # noqa: E402
+from app.warehouse.taobao_current_price_items import (  # noqa: E402
+    TaobaoCurrentPricePayloadError, parse_payload as parse_current,
+)
 from app.warehouse.taobao_risk_price_items import parse_payload as parse_risk  # noqa: E402
 
 
@@ -49,6 +51,16 @@ def activity_payload(item_id: str = "1") -> dict[str, object]:
 
 
 class TaobaoOperationalSnapshotTests(unittest.TestCase):
+    def test_current_price_parser_rejects_platform_error_and_missing_items(self) -> None:
+        with self.assertRaises(TaobaoCurrentPricePayloadError):
+            parse_current({"pages": [current_payload(), {"ret": ["BUSINESS_EXCEPTION::ic服务异常"], "data": {}}]}, business_day=DAY)
+        with self.assertRaises(TaobaoCurrentPricePayloadError):
+            parse_current({"ret": ["SUCCESS::调用成功"], "data": {"model": {}}}, business_day=DAY)
+        self.assertEqual(
+            parse_current({"ret": ["SUCCESS::调用成功"], "data": {"model": {"items": []}}}, business_day=DAY).rows,
+            [],
+        )
+
     def test_parsers_accept_nested_payloads_and_empty_activity_pages(self) -> None:
         self.assertEqual(parse_risk(risk_payload(), business_day=DAY).rows[0].item_id, "1")
         self.assertEqual(parse_current(current_payload(), business_day=DAY).rows[0].item_id, "1")

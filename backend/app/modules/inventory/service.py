@@ -223,6 +223,11 @@ class InventoryService:
         if not values:
             return 0
         with self.database.connect(initialize=True, read_only=False) as conn:
+            previous = conn.execute(
+                "select count(*) from jackyun_inventory_snapshots where store_id = ? and business_day = ?",
+                (store_id or 0, business_day.isoformat()),
+            ).fetchone()[0]
+            self._reject_suspicious_drop(previous, len(values), "库存快照")
             # The inventory endpoint represents a full point-in-time snapshot.
             # Replace the store/day slice so SKUs that disappeared upstream do
             # not remain as false stock after the next hourly refresh.
@@ -283,6 +288,11 @@ class InventoryService:
         if not values:
             return 0
         with self.database.connect(initialize=True, read_only=False) as conn:
+            previous = conn.execute(
+                "select count(*) from jackyun_goods_master where store_id = ?", (store_key,)
+            ).fetchone()[0]
+            new_count = len({(row[1], row[2]) for row in values})
+            self._reject_suspicious_drop(previous, new_count, "普通货品主档")
             conn.execute("delete from jackyun_goods_master where store_id = ?", (store_key,))
             conn.executemany(
                 """
@@ -349,6 +359,10 @@ class InventoryService:
         package_keys = {(row[1], row[2]) for row in products}
         components = [row for row in components if (row[1], row[2]) in package_keys]
         with self.database.connect(initialize=True, read_only=False) as conn:
+            previous = conn.execute(
+                "select count(*) from jackyun_package_products where store_id = ?", (store_key,)
+            ).fetchone()[0]
+            self._reject_suspicious_drop(previous, len(products), "组合货品主档")
             conn.execute("delete from jackyun_package_components where store_id = ?", (store_key,))
             conn.execute("delete from jackyun_package_products where store_id = ?", (store_key,))
             conn.executemany(
@@ -376,6 +390,39 @@ class InventoryService:
             )
             conn.commit()
         return len(products), len(components)
+
+    @staticmethod
+    def _reject_suspicious_drop(previous: int, current: int, label: str) -> None:
+        if previous >= 100 and current < previous // 2:
+            raise ValueError(f"{label}本次仅返回 {current} 条，上次为 {previous} 条；疑似分页缺失，已保留旧数据")
+
+    def reusable_package_components(self, *, store_id: int) -> dict[tuple[str, str], tuple[str, list[dict[str, Any]]]]:
+        """Read last successful component relations for incremental ERP sync."""
+        with self.database.connect() as conn:
+            products = {
+                (str(row["goods_id"]), str(row["sku_id"])): (str(row["updated_at"]), [])
+                for row in conn.execute(
+                    "select goods_id, sku_id, updated_at from jackyun_package_products where store_id = ?",
+                    (store_id,),
+                )
+            }
+            for row in conn.execute(
+                """select package_goods_id, package_sku_id, component_goods_id, component_sku_id,
+                          component_goods_no, component_sku_barcode, component_goods_name, required_quantity
+                   from jackyun_package_components where store_id = ?""",
+                (store_id,),
+            ):
+                key = (str(row["package_goods_id"]), str(row["package_sku_id"]))
+                if key in products:
+                    products[key][1].append({
+                        "component_goods_id": row["component_goods_id"],
+                        "component_sku_id": row["component_sku_id"],
+                        "component_goods_no": row["component_goods_no"],
+                        "component_sku_barcode": row["component_sku_barcode"],
+                        "component_goods_name": row["component_goods_name"],
+                        "required_quantity": row["required_quantity"],
+                    })
+        return products
 
     def record_master_sync(
         self,
@@ -858,13 +905,41 @@ class InventoryService:
                 "select * from jackyun_package_products where store_id = ? order by goods_no, sku_id",
                 (store_key,),
             ).fetchall()]
+            package_terms = self._candidate_terms(query) if query else []
+
+            def matches_package(product: dict[str, Any]) -> bool:
+                if not query:
+                    return True
+                searchable = " ".join(str(product.get(field) or "") for field in (
+                    "goods_no", "sku_no", "goods_name", "sku_name",
+                ))
+                return _compact(query) in _compact(searchable) or self._matches_query(product, query, package_terms)
+
+            matched_packages = [product for product in package_products if matches_package(product)]
+            package_components: dict[tuple[str, str], list[dict[str, Any]]] = {}
+            if len(matched_packages) > 20:
+                for component in conn.execute(
+                    "select * from jackyun_package_components where store_id = ? order by component_id",
+                    (store_key,),
+                ):
+                    key = (str(component["package_goods_id"]), str(component["package_sku_id"]))
+                    package_components.setdefault(key, []).append(dict(component))
+                for product in matched_packages:
+                    package_components.setdefault((str(product.get("goods_id")), str(product.get("sku_id"))), [])
+
+            def components_for(product: dict[str, Any]) -> list[dict[str, Any]]:
+                key = (str(product.get("goods_id")), str(product.get("sku_id")))
+                if key not in package_components:
+                    package_components[key] = [dict(row) for row in conn.execute(
+                        "select * from jackyun_package_components where store_id = ? and package_goods_id = ? and package_sku_id = ? order by component_id",
+                        (store_key, *key),
+                    ).fetchall()]
+                return package_components[key]
+
             if latest_day is None:
                 package_rows = []
-                for product in package_products:
-                    components = [dict(row) for row in conn.execute(
-                        "select * from jackyun_package_components where store_id = ? and package_goods_id = ? and package_sku_id = ? order by component_id",
-                        (store_key, product.get("goods_id"), product.get("sku_id")),
-                    ).fetchall()]
+                for product in matched_packages:
+                    components = components_for(product)
                     package_rows.append({
                         "key": _compact(product.get("sku_id") or product.get("goods_no")) or "unknown",
                         "goods_no": product.get("goods_no") or "",
@@ -969,13 +1044,8 @@ class InventoryService:
             warehouse_summary.sort(key=lambda row: (-row["zero_stock_count"], -row["available_quantity"]))
 
             package_rows: list[dict[str, Any]] = []
-            for product in package_products:
-                if query and not self._matches_query(product, query, self._candidate_terms(query)):
-                    continue
-                components = [dict(row) for row in conn.execute(
-                    "select * from jackyun_package_components where store_id = ? and package_goods_id = ? and package_sku_id = ? order by component_id",
-                    (store_key, product.get("goods_id"), product.get("sku_id")),
-                ).fetchall()]
+            for product in matched_packages:
+                components = components_for(product)
                 package_rows.append({
                     "key": _compact(product.get("sku_id") or product.get("goods_no")) or "unknown",
                     "goods_no": product.get("goods_no") or "",

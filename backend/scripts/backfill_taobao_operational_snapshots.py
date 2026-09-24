@@ -14,10 +14,14 @@ sys.path.insert(0, str(PROJECT_ROOT / "backend"))
 
 from app.core.config import settings  # noqa: E402
 from app.core.local_database import LocalDatabase, q  # noqa: E402
-from app.integrations.tmall_session import add_session_source_arguments, resolve_runtime_session  # noqa: E402
+from app.modules.collection.dates import validate_collection_day  # noqa: E402
+from app.integrations.tmall_session import add_session_source_arguments  # noqa: E402
+from app.integrations.session.helpers import request_cookie_headers_for_urls  # noqa: E402
 from app.modules.imports.crawl_run_store import CrawlRunStore  # noqa: E402
 from app.warehouse.store import WarehouseStore  # noqa: E402
 from scripts.fetch_taobao_operational_snapshots import (  # noqa: E402
+    ACTIVITY_URL,
+    MTOP_URL,
     fetch_activity_items,
     fetch_current_prices,
     fetch_risk_price,
@@ -30,7 +34,7 @@ ACTIVITY_TYPES = ("bybt_online", "bybt_pending", "flash_sale_online")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Collect and replace Taobao operational item snapshots day by day.")
+    parser = argparse.ArgumentParser(description="Capture the current Taobao operational item snapshot (today in Asia/Shanghai only).")
     parser.add_argument("--start", type=date.fromisoformat, required=True)
     parser.add_argument("--end", type=date.fromisoformat, required=True)
     parser.add_argument("--store-id", type=int, default=1)
@@ -50,6 +54,7 @@ def main() -> int:
     add_session_source_arguments(parser)
     args = parser.parse_args()
     _validate(args)
+    validate_collection_day(("taobao_operational_snapshots",), args.start)
     days = _days(args.start, args.end)
     args.database_path = args.database_path.expanduser().resolve()
     args.output_dir = args.output_dir.expanduser().resolve()
@@ -57,7 +62,14 @@ def main() -> int:
     database.initialize_schema()
     existing = _existing_days(database, args.store_id)
     pending = [day for day in days if args.refresh_existing or day not in existing]
-    session = resolve_runtime_session(source=args.session_source, cookie_env=args.cookie_env, browser_port=args.browser_port) if pending else None
+    cookies = (
+        request_cookie_headers_for_urls(
+            source=args.session_source, cookie_env=args.cookie_env,
+            browser_port=args.browser_port, urls=(MTOP_URL, ACTIVITY_URL),
+            expected_hosts=("myseller.taobao.com",),
+        )
+        if pending else {}
+    )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     log_path = args.output_dir / f"backfill_taobao_operational_snapshots_{_stamp()}.jsonl"
     warehouse = WarehouseStore(args.database_path)
@@ -75,7 +87,11 @@ def main() -> int:
                 print(f"[{index}/{len(days)}] {day} skipped existing")
                 continue
             try:
-                risk_path, current_path, activity_path, details = _fetch_day(day, args, session.cookie_header if session else "")
+                validate_collection_day(("taobao_operational_snapshots",), day)
+                risk_path, current_path, activity_path, details = _fetch_day(
+                    day, args, cookies[MTOP_URL], cookies[ACTIVITY_URL],
+                )
+                validate_collection_day(("taobao_operational_snapshots",), day)
                 result = warehouse.ingest_taobao_operational_snapshots(
                     risk_price_path=risk_path,
                     current_price_path=current_path,
@@ -106,11 +122,11 @@ def main() -> int:
     return 0 if not summary["failed"] else 1
 
 
-def _fetch_day(day: date, args: argparse.Namespace, cookie: str) -> tuple[Path, Path, Path, dict[str, Any]]:
+def _fetch_day(day: date, args: argparse.Namespace, mtop_cookie: str, activity_cookie: str) -> tuple[Path, Path, Path, dict[str, Any]]:
     directory = args.output_dir / day.isoformat()
     directory.mkdir(parents=True, exist_ok=True)
     risk_output = directory / "risk_price.json"
-    risk = fetch_risk_price(output=risk_output, cookie=cookie, timeout=args.timeout)
+    risk = fetch_risk_price(output=risk_output, cookie=mtop_cookie, timeout=args.timeout)
     if not risk.ok:
         raise RuntimeError(f"risk-price fetch failed: HTTP {risk.status}, code {risk.code}, message {risk.message}")
     current_pages: list[dict[str, Any]] = []
@@ -118,7 +134,7 @@ def _fetch_day(day: date, args: argparse.Namespace, cookie: str) -> tuple[Path, 
     current_stop = "max_pages"
     for page in range(1, args.max_pages + 1):
         output = directory / f"current_price_{page:04d}.json"
-        result = fetch_current_prices(output=output, cookie=cookie, page=page, size=args.current_page_size, timeout=args.timeout)
+        result = fetch_current_prices(output=output, cookie=mtop_cookie, page=page, size=args.current_page_size, timeout=args.timeout)
         if not result.ok:
             raise RuntimeError(f"current-price page {page} fetch failed: HTTP {result.status}, code {result.code}, message {result.message}")
         payload = json.loads(output.read_text(encoding="utf-8"))
@@ -147,7 +163,7 @@ def _fetch_day(day: date, args: argparse.Namespace, cookie: str) -> tuple[Path, 
         stop = "max_pages"
         for page in range(1, args.max_pages + 1):
             output = directory / f"{snapshot_type}_{page:04d}.json"
-            result = fetch_activity_items(output=output, cookie=cookie, snapshot_type=snapshot_type, page=page, page_size=args.activity_page_size, timeout=args.timeout)
+            result = fetch_activity_items(output=output, cookie=activity_cookie, snapshot_type=snapshot_type, page=page, page_size=args.activity_page_size, timeout=args.timeout)
             if not result.ok:
                 raise RuntimeError(f"{snapshot_type} page {page} fetch failed: HTTP {result.status}, code {result.code}, message {result.message}")
             payload = json.loads(output.read_text(encoding="utf-8"))
@@ -173,9 +189,9 @@ def _fetch_day(day: date, args: argparse.Namespace, cookie: str) -> tuple[Path, 
 
 
 def _page_metadata(payload: object) -> tuple[list[object], int | None]:
-    def find(value: object, depth: int = 0) -> tuple[list[object], int | None]:
+    def find(value: object, depth: int = 0) -> tuple[list[object], int | None] | None:
         if depth > 6 or not isinstance(value, dict):
-            return [], None
+            return None
         for key in ("items", "data", "list", "rows", "riskDetectRecords"):
             rows = value.get(key)
             if isinstance(rows, list):
@@ -186,10 +202,13 @@ def _page_metadata(payload: object) -> tuple[list[object], int | None]:
                     return rows, None
         for key in ("data", "model", "result", "content"):
             found = find(value.get(key), depth + 1)
-            if found[0] or found[1] is not None:
+            if found is not None:
                 return found
-        return [], None
-    return find(payload)
+        return None
+    result = find(payload)
+    if result is None:
+        raise ValueError("商品快照分页未返回明细列表，不能将异常响应当作空页。")
+    return result
 
 
 def _existing_days(database: LocalDatabase, store_id: int) -> set[date]:
@@ -217,6 +236,8 @@ def _existing_days(database: LocalDatabase, store_id: int) -> set[date]:
 def _validate(args: argparse.Namespace) -> None:
     if args.end < args.start or not 1 <= args.current_page_size <= 500 or not 1 <= args.activity_page_size <= 200 or args.max_pages < 1:
         raise ValueError("invalid date range, page sizes, or max-pages")
+    if args.start != args.end:
+        raise ValueError("operational snapshots are current-state only; --start and --end must be the same day")
     if args.page_sleep < 0 or args.day_sleep_min < 0 or args.day_sleep_max < args.day_sleep_min:
         raise ValueError("sleep values must be valid")
 

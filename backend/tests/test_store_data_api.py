@@ -191,3 +191,44 @@ def test_collection_health_separates_browser_and_cookie_status(
         object.__setattr__(settings, "tmall_session_source", original_source)
         object.__setattr__(settings, "tmall_cookie_env", original_cookie_env)
         _restore_settings(original)
+
+
+def test_collection_health_inspects_platforms_when_browser_connected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: the browser-connected branch must keep working.
+
+    ``/api/v1/imports/health`` calls
+    ``inspect_browser_platform_sessions(tmall_browser_port)`` — port only, no
+    specs mapping.  When that function grew a *required* ``specs`` argument the
+    call raised ``TypeError`` and the endpoint answered HTTP 500.  The sibling
+    test above never caught it because it forces ``session_source="env"`` and a
+    disconnected browser, so it never reaches this branch.
+
+    The real ``inspect_browser_platform_sessions`` is kept in play; only the
+    browser handle and tab discovery are stubbed so no desktop browser is
+    touched.
+    """
+    from app.integrations.session import core as session_core
+    from app.integrations.session import helpers as session_helpers
+
+    database_path = tmp_path / "collection-health-browser.sqlite3"
+    _seed_database(database_path)
+    original = _set_database(database_path)
+    original_source = settings.tmall_session_source
+    object.__setattr__(settings, "tmall_session_source", "drissionpage")
+    monkeypatch.setattr(collection, "_browser_probe", lambda _port: (True, "浏览器已连接"))
+    monkeypatch.setattr(session_core, "DrissionPageBrowser", lambda _port: object())
+    monkeypatch.setattr(session_helpers, "_browser_tabs", lambda _browser, _hosts=(): [])
+    try:
+        with TestClient(create_app()) as client:
+            response = client.get("/api/v1/imports/health")
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["browser_connected"] is True
+            # Codes resolved from the bare port keep the documented reporting order.
+            assert [item["code"] for item in payload["platforms"]] == ["sycm", "cps"]
+    finally:
+        object.__setattr__(settings, "tmall_session_source", original_source)
+        _restore_settings(original)

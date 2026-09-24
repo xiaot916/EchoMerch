@@ -20,7 +20,17 @@ PARSER_VERSION = "utry-overviews-v1"
 
 
 class UtryPayloadError(ValueError):
-    pass
+    """The U先 response is not a valid report payload.
+
+    ``no_data`` is True when the API returned a well-formed envelope (HTTP 200,
+    ``code=0``, ``success=true``) whose ``data.value`` is null — the platform
+    explicitly says "no campaign data for this day".  Callers use this flag to
+    record ``no_data`` in the ledger instead of ``ingest_failed``.
+    """
+
+    def __init__(self, message: str, *, no_data: bool = False) -> None:
+        super().__init__(message)
+        self.no_data = no_data
 
 
 @dataclass(frozen=True)
@@ -246,6 +256,11 @@ def _rows(
         )
     data = payload.get("data")
     value = data.get("value") if isinstance(data, dict) else None
+    if value is None:
+        # HTTP 200, code=0, success=true, but data.value is null — the
+        # platform explicitly says "no campaign data for this day".  This is
+        # a legitimate no-data day, not a parse failure.
+        raise UtryPayloadError("The U先 response has no data.value (no campaign data for this day).", no_data=True)
     if not isinstance(value, dict):
         raise UtryPayloadError("The U先 response has no data.value.")
     columns = value.get("columns")

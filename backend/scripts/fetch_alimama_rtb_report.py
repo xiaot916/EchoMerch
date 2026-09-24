@@ -4,12 +4,13 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 from datetime import date
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -62,6 +63,7 @@ BIDWORD_REPORT_FIELDS = (
     "rhRate",
     "hySgUv",
     "hyPayAmt",
+    "alipayInshopUv",
     "newAlipayInshopUv",
     "newAlipayInshopUvRate",
 )
@@ -237,6 +239,15 @@ def alimama_report_home(rpt_type: str) -> str:
     return ALIMAMA_REPORT_HOME
 
 
+def alimama_browser_fallback_port(source: str, port: int) -> int | None:
+    value = str(port) if source == "drissionpage" else os.getenv("ECHO_BATCH_ALIMAMA_BROWSER_PORT", "")
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    return parsed if 1 <= parsed <= 65535 else None
+
+
 def fetch_alimama_report(
     *,
     start_day: date,
@@ -255,6 +266,7 @@ def fetch_alimama_report(
     page_size: int = 20,
     page: int = 1,
     timeout: int = 30,
+    browser_port: int | None = None,
 ) -> tuple[int, int | None, str | None, int]:
     query = {
         "csrfId": csrf_id,
@@ -324,9 +336,61 @@ def fetch_alimama_report(
         response_body = exc.read()
         status = exc.code
 
+    if _response_status(response_body)[1] == "non-json response" and browser_port is not None:
+        try:
+            status, response_body = _fetch_in_existing_alimama_tab(
+                browser_port, request.full_url, request.data, timeout=timeout,
+            )
+        except RuntimeError:
+            output.write_bytes(response_body)
+            raise
     output.write_bytes(response_body)
     code, message = _response_status(response_body)
     return status, code, message, len(response_body)
+
+
+def _fetch_in_existing_alimama_tab(
+    browser_port: int, url: str, data: bytes, *, timeout: int,
+) -> tuple[int, bytes]:
+    from app.integrations.session.core import DrissionPageBrowser, RuntimeSessionUnavailable
+
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or f"{parsed.scheme}://{parsed.netloc}{parsed.path}" != ALIMAMA_REPORT_URL:
+        raise ValueError("推广浏览器回退只支持已登记的只读报表接口。")
+    tab = DrissionPageBrowser(browser_port).find_tab(("one.alimama.com",))
+    if tab is None:
+        raise RuntimeSessionUnavailable("推广直连失败，且没有可复用的阿里妈妈报表页面。")
+    script = """(async () => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), %d);
+      try {
+        const response = await fetch(%s, {
+          method: 'POST', credentials: 'include', signal: controller.signal,
+          headers: {'content-type': 'application/json', 'x-requested-with': 'XMLHttpRequest'},
+          body: %s,
+        });
+        return {status: response.status, body: await response.text()};
+      } catch (_) { return {error: 'request_failed'}; }
+      finally { clearTimeout(timer); }
+    })()""" % (
+        max(1000, timeout * 1000), json.dumps(parsed.path + "?" + parsed.query),
+        json.dumps(data.decode("utf-8")),
+    )
+    result: list[object] = []
+
+    def evaluate() -> None:
+        try:
+            result.append(tab.run_cdp("Runtime.evaluate", expression=script, awaitPromise=True, returnByValue=True))
+        except Exception:
+            result.append(None)
+
+    worker = threading.Thread(target=evaluate, daemon=True, name="alimama-browser-fetch")
+    worker.start()
+    worker.join(timeout=max(1, timeout) + 5)
+    value = result[0].get("result", {}).get("value") if result and isinstance(result[0], dict) else None
+    if worker.is_alive() or not isinstance(value, dict) or not isinstance(value.get("body"), str):
+        raise RuntimeSessionUnavailable("阿里妈妈页面内报表请求失败，请检查登录和网络状态。")
+    return int(value["status"]), value["body"].encode("utf-8")
 
 
 def _response_status(response_body: bytes) -> tuple[int | None, str | None]:
@@ -363,7 +427,11 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--rpt-type", choices=sorted(REPORT_CONFIG), default="adgroup")
     parser.add_argument("--csrf-id", default=os.getenv("RTB_CSRF_ID", ""))
-    parser.add_argument("--login-point-id", default=os.getenv("RTB_LOGIN_POINT_ID", ""))
+    parser.add_argument(
+        "--login-point-id",
+        default=os.getenv("RTB_LOGIN_POINT_ID", ""),
+        help="Optional. The server does not validate loginPointId; one is minted locally when empty.",
+    )
     parser.add_argument("--page", type=int, default=1)
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--page-size", type=int, default=20)
@@ -407,6 +475,7 @@ def main() -> int:
         page=args.page,
         page_size=args.page_size,
         timeout=args.timeout,
+        browser_port=alimama_browser_fallback_port(args.session_source, args.browser_port),
     )
     print(
         json.dumps(

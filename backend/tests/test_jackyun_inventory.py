@@ -5,10 +5,12 @@ from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from app.core.config import settings
 from app.core.local_database import LocalDatabase
 from app.integrations.jackyun_credentials import load_vault, save_vault, vault_contains_plaintext
-from app.integrations.jackyun_inventory import JackyunClient, JackyunInventorySyncService
+from app.integrations.jackyun_inventory import JackyunClient, JackyunIntegrationError, JackyunInventorySyncService
 from app.modules.imports.crawl_run_store import CrawlRunStore
 
 
@@ -260,3 +262,73 @@ def test_sync_service_reads_store_ids_from_localized_store_schema(tmp_path: Path
     )
 
     assert service.store_ids() == [7]
+
+
+def test_package_master_reuses_unchanged_components_and_refreshes_missing_or_changed(tmp_path: Path):
+    config = replace(_config(tmp_path), jackyun_package_url="https://jackyun.test/packages", jackyun_package_detail_url="https://jackyun.test/components")
+    client = JackyunClient(config)
+    service = JackyunInventorySyncService(tmp_path / "incremental.sqlite3", client)
+    service.inventory.replace_package_master(store_id=1, records=[
+        {"product": {"goodsId": "unchanged", "skuId": "u", "goodsNo": "U"}, "components": [{"goodsNo": "PART-U", "skuId": "part-u", "goodsAmount": 2}]},
+        {"product": {"goodsId": "changed", "skuId": "c", "goodsNo": "C"}, "components": [{"goodsNo": "OLD", "skuId": "old", "goodsAmount": 1}]},
+        {"product": {"goodsId": "empty", "skuId": "e", "goodsNo": "E"}, "components": []},
+        {"product": {"goodsId": "removed", "skuId": "r", "goodsNo": "R"}, "components": [{"goodsNo": "PART-R", "goodsAmount": 1}]},
+    ])
+    client.fetch_goods = lambda _store_id: [{"goodsId": "ordinary", "goodsNo": "O"}]
+    client.fetch_package_products = lambda _store_id: [
+        {"goodsId": "unchanged", "skuId": "u", "goodsNo": "U", "gmtModified": "2000-01-01T00:00:00+08:00"},
+        {"goodsId": "changed", "skuId": "c", "goodsNo": "C", "gmtModified": "2099-01-01T00:00:00+08:00"},
+        {"goodsId": "empty", "skuId": "e", "goodsNo": "E", "gmtModified": "2000-01-01T00:00:00+08:00"},
+        {"goodsId": "new", "skuId": "n", "goodsNo": "N", "gmtModified": 1782096582000},
+    ]
+    fetched: list[str] = []
+
+    def fetch_components(goods_id: str):
+        fetched.append(goods_id)
+        return [{"goodsNo": f"PART-{goods_id}", "skuId": f"part-{goods_id}", "goodsAmount": 3}]
+
+    client.fetch_package_components = fetch_components
+    result = service.sync_daily_masters(1, business_day=date(2026, 9, 23))
+
+    assert result["status"] == "success"
+    assert result["component_reused_count"] == 1
+    assert result["component_fetched_count"] == 3
+    assert fetched == ["changed", "empty", "new"]
+    cached = service.inventory.reusable_package_components(store_id=1)
+    assert cached[("unchanged", "u")][1][0]["required_quantity"] == 2
+    assert cached[("changed", "c")][1][0]["component_goods_no"] == "PART-changed"
+    assert ("removed", "r") not in cached
+
+
+def test_failed_incremental_package_detail_preserves_previous_master(tmp_path: Path):
+    config = replace(_config(tmp_path), jackyun_package_url="https://jackyun.test/packages", jackyun_package_detail_url="https://jackyun.test/components")
+    client = JackyunClient(config)
+    service = JackyunInventorySyncService(tmp_path / "failed-incremental.sqlite3", client)
+    service.inventory.replace_package_master(store_id=1, records=[
+        {"product": {"goodsId": "old", "skuId": "o", "goodsNo": "OLD"}, "components": [{"goodsNo": "PART", "goodsAmount": 2}]},
+    ])
+    client.fetch_goods = lambda _store_id: []
+    client.fetch_package_products = lambda _store_id: [{"goodsId": "new", "skuId": "n", "goodsNo": "NEW"}]
+
+    def fail_detail(_goods_id: str):
+        raise JackyunIntegrationError("detail unavailable")
+
+    client.fetch_package_components = fail_detail
+    result = service.sync_daily_masters(1, business_day=date(2026, 9, 23))
+    assert result["package_status"] == "failed"
+    assert set(service.inventory.reusable_package_components(store_id=1)) == {("old", "o")}
+
+
+def test_suspiciously_short_page_preserves_existing_package_master(tmp_path: Path):
+    service = JackyunInventorySyncService(tmp_path / "short-page.sqlite3", JackyunClient(_config(tmp_path)))
+    original = [
+        {"product": {"goodsId": f"G{i}", "skuId": f"S{i}", "goodsNo": f"N{i}"},
+         "components": [{"goodsNo": f"PART{i}", "goodsAmount": 1}]}
+        for i in range(100)
+    ]
+    service.inventory.replace_package_master(store_id=1, records=original)
+
+    with pytest.raises(ValueError, match="疑似分页缺失"):
+        service.inventory.replace_package_master(store_id=1, records=original[:20])
+
+    assert len(service.inventory.reusable_package_components(store_id=1)) == 100

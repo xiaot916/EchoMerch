@@ -7,6 +7,7 @@ import { useDashboard } from "@/composables/useDashboard"
 import { fetchStores } from "@/api"
 import type { StoreRecord } from "@/types"
 import BusinessContextBar from "@/layout/BusinessContextBar.vue"
+import DataFreshnessStrip from "@/layout/DataFreshnessStrip.vue"
 import NavigationSidebar from "@/layout/NavigationSidebar.vue"
 import PageHeader from "@/layout/PageHeader.vue"
 import RouteTabs from "@/layout/RouteTabs.vue"
@@ -122,6 +123,8 @@ watch(() => route.path, () => {
           @update:end-date="endDate = $event"
           @submit="loadCurrentDashboard(true)"
         />
+
+        <DataFreshnessStrip v-if="showBusinessContext && route.name !== 'ai'" />
 
         <section class="page-outlet">
           <RouterView v-slot="{ Component, route: pageRoute }">

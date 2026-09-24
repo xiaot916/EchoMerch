@@ -136,9 +136,11 @@ def test_super_admin_manages_user_lifecycle_over_http(tmp_path: Path) -> None:
             assert any(item["code"] == "data.manage" for item in directory.json()["permissions"])
             assert any(item["code"] == "system.manage" for item in directory.json()["permissions"])
             assert any(item["code"] == "route:overview" for item in directory.json()["menus"])
-            # 市场洞察和 AI 配置均作为独立入口纳入权限目录。
+            # 市场洞察、AI 配置、经营大屏均作为独立入口纳入权限目录。
             assert any(item["code"] == "route:system-ai" for item in directory.json()["menus"])
-            assert len(directory.json()["menus"]) == 47
+            assert any(item["code"] == "route:big-screen" for item in directory.json()["menus"])
+            # 14 个 domain 目录 + 34 个 route 菜单。
+            assert len(directory.json()["menus"]) == 48
 
             role_access = client.put(
                 "/api/v1/access/roles/operator/access",

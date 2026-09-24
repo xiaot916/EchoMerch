@@ -3,10 +3,13 @@ import { computed, ref, watch } from "vue"
 import { Activity, ArrowDownRight, ArrowUpRight, CircleDollarSign, Gauge, Megaphone, MousePointerClick, PackageCheck, ReceiptText, ShoppingBag, Target, UsersRound, Video } from "lucide-vue-next"
 
 import { fetchAnalyticsProducts, fetchFlashSaleAnalysis, fetchStores } from "@/api"
+import BusinessActionTable from "@/components/BusinessActionTable.vue"
 import BusinessChart from "@/components/BusinessChart.vue"
 import EmptyState from "@/components/EmptyState.vue"
 import SalesGrowthBridge from "@/components/SalesGrowthBridge.vue"
 import { useDashboard } from "@/composables/useDashboard"
+import { buildSalesGrowthBridge, type BusinessActionRow } from "@/lib/businessDecision"
+import { baseValueAxis } from "@/lib/echartsTheme"
 import { compactRange, currency, number, ratio, shortDate } from "@/lib/format"
 import type { FlashSaleAnalysisResponse, ProductMetric } from "@/types"
 
@@ -61,9 +64,9 @@ const channelContributionOption = computed(() => ({
     return item ? `${item.label}<br/>归因成交 ${currency(item.amount)}<br/>占全店支付 ${ratio(item.share)}<br/>${item.note}` : ""
   } },
   grid: { left: 88, right: 48, top: 18, bottom: 30 },
-  xAxis: { type: "value", max: (value: { max: number }) => Math.max(10, Math.ceil(value.max / 10) * 10), axisLabel: { formatter: "{value}%", color: "#849188" }, splitLine: { lineStyle: { color: "#edf1ef" } } },
+  xAxis: baseValueAxis({ max: (value: { max: number }) => Math.max(10, Math.ceil(value.max / 10) * 10), axisLabel: { formatter: "{value}%", color: "#849188" } }),
   yAxis: { type: "category", data: channelContributions.value.map((item) => item.label), axisLabel: { color: "#56675d" } },
-  series: [{ type: "bar", barMaxWidth: 18, label: { show: true, position: "right", formatter: (params: { value: number }) => `${Number(params.value).toFixed(1)}%`, color: "#54645b", fontSize: 10 }, data: channelContributions.value.map((item) => Number(item.share.toFixed(2))) }],
+  series: [{ type: "bar", barMaxWidth: 18, label: { show: true, position: "right", formatter: (params: { value: number }) => `${Number(params.value).toFixed(1)}%`, color: "#54645b", fontSize: 12 }, data: channelContributions.value.map((item) => Number(item.share.toFixed(2))) }],
 }))
 const liveStructure = computed(() => {
   const live = analysis.value?.live
@@ -90,7 +93,7 @@ const productPositioningStructure = computed(() => {
     const items = products.value.filter((item) => normalizePositioning(item.positioning) === name)
     const amount = items.reduce((sum, item) => sum + item.paid_amount, 0)
     return { label: name, amount, count: items.length, share: total ? amount / total * 100 : 0, color: POSITIONING_COLORS[name] }
-  })
+  }).filter((item) => item.count > 0 || item.amount > 0)
 })
 
 const selectedPositioning = ref<PositioningBucket>("正装")
@@ -125,7 +128,7 @@ const productPositioningPieOption = computed(() => ({
     radius: ["42%", "72%"],
     center: ["50%", "48%"],
     avoidLabelOverlap: true,
-    label: { color: "#506158", fontSize: 10, formatter: (params: { name: string; percent: number }) => `${params.name} ${params.percent.toFixed(1)}%` },
+    label: { color: "#506158", fontSize: 12, formatter: (params: { name: string; percent: number }) => `${params.name} ${params.percent.toFixed(1)}%` },
     labelLine: { length: 8, length2: 8, lineStyle: { color: "#bcc9c1" } },
     data: productPositioningStructure.value.filter((item) => item.amount > 0).map((item) => ({ name: item.label, value: item.amount, itemStyle: { color: item.color } })),
   }],
@@ -141,7 +144,7 @@ const selectedSeriesPieOption = computed(() => ({
     radius: ["42%", "72%"],
     center: ["50%", "48%"],
     avoidLabelOverlap: true,
-    label: { color: "#506158", fontSize: 10, formatter: (params: { name: string; percent: number }) => `${params.name} ${params.percent.toFixed(1)}%` },
+    label: { color: "#506158", fontSize: 12, formatter: (params: { name: string; percent: number }) => `${params.name} ${params.percent.toFixed(1)}%` },
     labelLine: { length: 8, length2: 8, lineStyle: { color: "#bcc9c1" } },
     data: selectedSeriesStructure.value.map((item) => ({ name: item.label, value: item.amount, itemStyle: { color: item.color } })),
   }],
@@ -241,24 +244,97 @@ const coreMetrics = computed(() => {
   ]
 })
 
+type Granularity = "day" | "week" | "month"
+const granularity = ref<Granularity>("day")
+const granularityOptions: Array<{ key: Granularity; label: string }> = [
+  { key: "day", label: "日" },
+  { key: "week", label: "周" },
+  { key: "month", label: "月" },
+]
+const isSingleDay = computed(() => dashboard.value?.period.expected_days === 1)
+
+function weekStart(value: string): string {
+  const date = new Date(`${value}T12:00:00`)
+  const weekday = date.getDay() || 7
+  date.setDate(date.getDate() - weekday + 1)
+  return date.toISOString().slice(0, 10)
+}
+
+interface TrendBucket {
+  label: string
+  date: string
+  paid: number | null
+  refund: number | null
+  rate: number | null
+}
+
+const trendBuckets = computed<TrendBucket[]>(() => {
+  if (granularity.value === "day") {
+    return operatingDays.value.map((item) => ({
+      label: item.statDate.slice(5),
+      date: item.statDate,
+      paid: item.store ? item.store.paid_amount : null,
+      refund: item.store ? item.store.refund_amount : null,
+      rate: item.store ? item.store.refund_rate : null,
+    }))
+  }
+  const buckets = new Map<string, { paid: number; refund: number }>()
+  for (const item of operatingDays.value) {
+    if (!item.store) continue
+    const key = granularity.value === "week" ? weekStart(item.statDate) : item.statDate.slice(0, 7)
+    const bucket = buckets.get(key) ?? { paid: 0, refund: 0 }
+    bucket.paid += item.store.paid_amount
+    bucket.refund += item.store.refund_amount
+    buckets.set(key, bucket)
+  }
+  return [...buckets.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([key, bucket]) => ({
+    label: granularity.value === "week" ? key.slice(5) : key,
+    date: key,
+    paid: bucket.paid,
+    refund: bucket.refund,
+    rate: bucket.paid > 0 ? Number(((bucket.refund / bucket.paid) * 100).toFixed(2)) : 0,
+  }))
+})
+
 const resultTrendOption = computed(() => {
-  const rows = operatingDays.value
+  const rows = trendBuckets.value
   return {
-    color: ["#1b9a70", "#e09a3e"],
+    color: ["#1b9a70", "#e09a3e", "#c2765b"],
     tooltip: { trigger: "axis", formatter: (params: Array<{ dataIndex: number }>) => {
-      const row = rows[params[0]?.dataIndex ?? 0]?.store
-      return row ? `${row.stat_date}<br/>支付金额 ${currency(row.paid_amount)}<br/>退款金额 ${currency(row.refund_amount)}<br/>净支付 ${currency(row.paid_amount - row.refund_amount)}` : "该日暂无店铺日报"
+      const row = rows[params[0]?.dataIndex ?? 0]
+      if (!row || row.paid === null) return "该区间暂无店铺日报"
+      return `${row.date}<br/>支付金额 ${currency(row.paid)}<br/>退款金额 ${currency(row.refund ?? 0)}<br/>净支付 ${currency(row.paid - (row.refund ?? 0))}<br/>金额退款率 ${Number(row.rate ?? 0).toFixed(2)}%`
     } },
-    legend: { bottom: 0, data: ["支付金额", "退款金额"], textStyle: { color: "#718179", fontSize: 11 } },
-    grid: { left: 62, right: 24, top: 22, bottom: 48 },
-    xAxis: { type: "category", data: rows.map((item) => item.statDate.slice(5)), axisLabel: { color: "#8491a3" } },
-    yAxis: { type: "value", axisLabel: { formatter: (value: number) => `${Math.round(value / 10000)}万` }, splitLine: { lineStyle: { color: "#edf1ef" } } },
+    legend: { bottom: 0, data: ["支付金额", "退款金额", "金额退款率"], textStyle: { color: "#718179", fontSize: 12 } },
+    grid: { left: 62, right: 56, top: 22, bottom: 48 },
+    xAxis: { type: "category", data: rows.map((item) => item.label), axisLabel: { color: "#8491a3" } },
+    yAxis: [
+      baseValueAxis({ axisLabel: { formatter: (value: number) => `${Math.round(value / 10000)}万` } }),
+      { type: "value", min: 0, axisLabel: { formatter: "{value}%" } },
+    ],
     series: [
-      { name: "支付金额", type: "line", smooth: true, symbol: "none", connectNulls: false, lineStyle: { width: 2.5 }, areaStyle: { color: "rgba(27,154,112,.10)" }, data: rows.map((item) => item.store?.paid_amount ?? null) },
-      { name: "退款金额", type: "bar", barMaxWidth: 15, data: rows.map((item) => item.store?.refund_amount ?? null) },
+      { name: "支付金额", type: "line", smooth: true, symbol: "none", connectNulls: false, lineStyle: { width: 2.5 }, areaStyle: { color: "rgba(27,154,112,.10)" }, data: rows.map((item) => item.paid) },
+      { name: "退款金额", type: "bar", barMaxWidth: 15, data: rows.map((item) => item.refund) },
+      { name: "金额退款率", type: "line", yAxisIndex: 1, smooth: true, symbol: "none", connectNulls: false, lineStyle: { width: 2, color: "#c2765b" }, itemStyle: { color: "#c2765b" }, data: rows.map((item) => item.rate) },
     ],
   }
 })
+
+const singleDayPaidOption = computed(() => ({
+  color: ["#16845b", "#b8c6bf"],
+  tooltip: { trigger: "axis", axisPointer: { type: "shadow" }, valueFormatter: (value: number) => currency(Number(value)) },
+  grid: { left: 68, right: 26, top: 28, bottom: 42 },
+  xAxis: { type: "category", data: ["当前日", "上一周期"], axisTick: { show: false }, axisLine: { lineStyle: { color: "#d9e1dc" } } },
+  yAxis: baseValueAxis({ axisLabel: { formatter: (value: number) => `¥${Math.round(value).toLocaleString("zh-CN")}` }, splitLine: { lineStyle: { color: "#edf1ef", type: "dashed" } } }),
+  series: [{
+    name: "支付金额",
+    type: "bar",
+    colorBy: "data",
+    barMaxWidth: 72,
+    label: { show: true, position: "top", color: "#405449", formatter: (params: { value: number }) => currency(Number(params.value)) },
+    data: [summary.value?.paid_amount || 0, comparison.value?.paid_amount.previous || 0],
+  }],
+}))
 
 const spendTrendOption = computed(() => {
   const rows = operatingDays.value
@@ -270,10 +346,10 @@ const spendTrendOption = computed(() => {
       const roiValue = row.spend ? row.paid_amount / row.spend : 0
       return `${row.stat_date}<br/>推广花费 ${currency(row.spend)}<br/>推广归因成交 ${currency(row.paid_amount)}<br/>推广 ROI ${roiValue.toFixed(2)}x`
     } },
-    legend: { bottom: 0, data: ["全量推广花费", "推广归因成交"], textStyle: { color: "#718179", fontSize: 11 } },
+    legend: { bottom: 0, data: ["全量推广花费", "推广归因成交"], textStyle: { color: "#718179", fontSize: 12 } },
     grid: { left: 62, right: 24, top: 22, bottom: 48 },
     xAxis: { type: "category", data: rows.map((item) => item.statDate.slice(5)), axisLabel: { color: "#8491a3" } },
-    yAxis: { type: "value", axisLabel: { formatter: (value: number) => `${Math.round(value / 10000)}万` }, splitLine: { lineStyle: { color: "#edf1ef" } } },
+    yAxis: baseValueAxis({ axisLabel: { formatter: (value: number) => `${Math.round(value / 10000)}万` } }),
     series: [
       { name: "全量推广花费", type: "bar", barMaxWidth: 16, data: rows.map((item) => item.promotion?.spend ?? null) },
       { name: "推广归因成交", type: "line", smooth: true, symbol: "none", connectNulls: false, lineStyle: { width: 2.3 }, data: rows.map((item) => item.promotion?.paid_amount ?? null) },
@@ -293,33 +369,59 @@ const previousSalesBridgeInput = computed(() => ({
   buyers: comparison.value?.buyers.previous ?? 0,
   conversionRate: comparison.value?.conversion_rate.previous ?? 0,
 }))
+
+const salesBridge = computed(() => buildSalesGrowthBridge(currentSalesBridgeInput.value, previousSalesBridgeInput.value))
+const missingDateLabel = computed(() => missingDates.value.map(shortDate).join("、"))
+
+const transactionActions = computed<BusinessActionRow[]>(() => {
+  const rows: BusinessActionRow[] = []
+  if (!coverageComplete.value) {
+    rows.push({ id: "coverage", priority: "P0", object: "店铺日报", issue: "统计区间存在缺失日", evidence: missingDateLabel.value || "日报覆盖不完整", impact: `${missingDates.value.length} 个缺失日`, action: "先补采缺失日期，再确认环比和金额贡献是否成立。", validation: "日报覆盖天数 = 应覆盖天数", window: "补采后即时", tone: "risk" })
+  }
+  const negativeDriver = salesBridge.value.drivers.slice().sort((left, right) => left.contribution - right.contribution)[0]
+  if (salesBridge.value.delta < 0 && negativeDriver?.contribution < 0) {
+    rows.push({ id: `driver-${negativeDriver.key}`, priority: "P0", object: negativeDriver.label, issue: "本周期支付下降的首要金额拖累", evidence: negativeDriver.explanation, impact: currency(negativeDriver.contribution), action: negativeDriver.key === "traffic" ? "下钻流量页定位下降渠道与入口。" : negativeDriver.key === "conversion" ? "检查高流量低转化渠道、商品和详情承接。" : "核对正装、试用装及其他装型的关联销售和低客单商品占比。", validation: "支付金额、该驱动贡献与支付买家", window: "3-7 天", tone: "risk" })
+  }
+  const metricDays = operatingDays.value.filter((item) => item.store)
+  const highRefundDay = metricDays.filter((item) => (item.store?.refund_amount ?? 0) > 0).sort((left, right) => (right.store?.refund_rate ?? 0) - (left.store?.refund_rate ?? 0))[0]
+  if (highRefundDay?.store) {
+    rows.push({ id: `refund-${highRefundDay.statDate}`, priority: highRefundDay.store.refund_rate >= refundRate.value * 1.25 ? "P0" : "P1", object: highRefundDay.statDate, issue: "区间内金额退款率最高日期", evidence: `退款率 ${ratio(highRefundDay.store.refund_rate)}，支付 ${currency(highRefundDay.store.paid_amount)}`, impact: currency(highRefundDay.store.refund_amount), action: "下钻当日退款商品、活动承诺和客服问题，区分集中退款与日常波动。", validation: "退款金额、退款率、净支付", window: "1-3 天", tone: "warning" })
+  }
+  const averageVisitors = metricDays.length ? (summary.value?.visitors ?? 0) / metricDays.length : 0
+  const lowConversionDay = metricDays.filter((item) => item.store && item.store.visitors >= averageVisitors * .7 && item.store.conversion_rate < (summary.value?.conversion_rate ?? 0) * .75).sort((left, right) => (right.store?.visitors ?? 0) - (left.store?.visitors ?? 0))[0]
+  if (lowConversionDay?.store) {
+    rows.push({ id: `conversion-${lowConversionDay.statDate}`, priority: "P1", object: lowConversionDay.statDate, issue: "有流量但支付转化明显低于区间水平", evidence: `${number(lowConversionDay.store.visitors)} 访客，转化 ${ratio(lowConversionDay.store.conversion_rate)}`, impact: currency(lowConversionDay.store.paid_amount), action: "核对当日主要渠道、商品库存、价格权益和详情页承接。", validation: "转化率、加购率、支付买家", window: "3-7 天", tone: "warning" })
+  }
+  return rows.slice(0, 4)
+})
 </script>
 
 <template>
   <section v-if="dashboard && summary && comparison" class="store-overview-page">
     <header class="store-overview-heading">
       <div><h1>经营概览</h1><span>支付、退款、推广与转化</span></div>
-      <div class="store-overview-status" :class="{ warning: !coverageComplete }"><Activity :size="16" /><div><strong>{{ coverageComplete ? "数据完整" : `日报缺失 ${missingDates.map(shortDate).join('、')}` }}</strong><small>{{ dashboard.daily_metrics.length }}/{{ dashboard.period.expected_days }} 天 · 最新 {{ shortDate(latestStoreDate) }}</small></div></div>
+      <div v-if="!coverageComplete" class="store-overview-status warning" role="status"><Activity :size="16" /><div><strong>日报缺失 {{ missingDates.map(shortDate).join('、') }}</strong><small>已覆盖 {{ dashboard.daily_metrics.length }}/{{ dashboard.period.expected_days }} 天 · 最新 {{ shortDate(latestStoreDate) }}</small></div></div>
     </header>
 
     <section class="store-kpi-grid store-kpi-grid-primary" aria-label="全店核心经营指标"><article v-for="item in coreMetrics.slice(0, 4)" :key="item.label" class="store-kpi" :class="`store-kpi-${item.tone}`"><div class="store-kpi-label"><span>{{ item.label }}</span><component :is="item.icon" :size="17" /></div><strong>{{ item.value }}</strong><small>{{ item.detail }}</small><em v-if="item.change !== null" :class="changeClass(item.change)"><ArrowUpRight v-if="item.change && item.change > 0" :size="13" /><ArrowDownRight v-else-if="item.change && item.change < 0" :size="13" />{{ changeLabel(item.change) }} 环比</em></article></section>
 
     <section class="store-kpi-grid store-kpi-grid-secondary" aria-label="全店补充经营指标"><article v-for="item in coreMetrics.slice(4)" :key="item.label" class="store-kpi" :class="`store-kpi-${item.tone}`"><div class="store-kpi-label"><span>{{ item.label }}</span><component :is="item.icon" :size="17" /></div><strong>{{ item.value }}</strong><small>{{ item.detail }}</small><em v-if="item.change !== null" :class="changeClass(item.change)"><ArrowUpRight v-if="item.change && item.change > 0" :size="13" /><ArrowDownRight v-else-if="item.change && item.change < 0" :size="13" />{{ changeLabel(item.change) }} 环比</em></article></section>
-    <section class="store-overview-grid"><article class="store-overview-panel store-result-panel"><header><div><h2>支付与退款</h2></div><span>净支付 {{ currency(summary.net_paid_amount) }}</span></header><BusinessChart v-if="dashboard.daily_metrics.length" :option="resultTrendOption" ariaLabel="全店支付金额退款金额趋势" :height="320" /><EmptyState v-else title="暂无支付数据" detail="当前区间没有店铺日报。" /></article><article class="store-overview-panel"><header><div><h2>支付增长贡献</h2></div><Gauge :size="18" /></header><SalesGrowthBridge :current="currentSalesBridgeInput" :previous="previousSalesBridgeInput" :comparable="coverageComplete" :height="248" /></article></section>
+    <section class="store-overview-grid"><article class="store-overview-panel store-result-panel"><header><div><h2>{{ isSingleDay ? "支付金额对比" : "支付与退款" }}</h2></div><div class="overview-panel-actions"><div v-if="!isSingleDay" class="overview-segmented" role="group" aria-label="趋势粒度"><button v-for="option in granularityOptions" :key="option.key" type="button" :class="{ active: granularity === option.key }" @click="granularity = option.key">{{ option.label }}</button></div><span>净支付 {{ currency(summary.net_paid_amount) }}</span></div></header><BusinessChart v-if="isSingleDay" :option="singleDayPaidOption" ariaLabel="当前日与上一周期支付金额对比图" :height="320" /><BusinessChart v-else-if="dashboard.daily_metrics.length" :option="resultTrendOption" ariaLabel="全店支付金额、退款金额与金额退款率趋势" :height="320" /><EmptyState v-else title="暂无支付数据" detail="当前区间没有店铺日报。" /></article><article class="store-overview-panel"><header><div><h2>支付增长贡献</h2></div><Gauge :size="18" /></header><SalesGrowthBridge :current="currentSalesBridgeInput" :previous="previousSalesBridgeInput" :comparable="coverageComplete" :height="248" /></article></section>
 
-    <section class="store-overview-grid store-overview-grid-lower"><article class="store-overview-panel"><header><div><h2>推广花费与归因成交</h2></div><span>{{ number(promotionCoverage?.covered_days || 0) }} 天</span></header><BusinessChart v-if="dashboard.promotion_daily_metrics.some((item) => item.spend > 0)" :option="spendTrendOption" ariaLabel="全量推广花费和推广归因成交趋势" :height="300" /><EmptyState v-else title="暂无推广数据" detail="当前区间没有推广日报。" /></article><article class="store-overview-panel store-efficiency-panel"><header><div><h2>推广与退款</h2></div><Target :size="18" /></header><div class="store-efficiency-main"><span>推广费比</span><strong>{{ ratio(summary.promotion_fee_ratio) }}</strong><small>全量推广花费 / 支付金额</small></div><div class="store-efficiency-pairs"><div><span>推广 ROI</span><strong>{{ summary.promotion_roi.toFixed(2) }}x</strong></div><div><span>归因成交</span><strong>{{ currency(summary.promotion_attributed_paid_amount) }}</strong></div><div><span>退款率</span><strong>{{ ratio(refundRate) }}</strong></div><div><span>净支付率</span><strong>{{ ratio(summary.paid_amount ? summary.net_paid_amount / summary.paid_amount * 100 : 0) }}</strong></div></div><p>推广费比 = 全量推广花费 / 支付金额；推广 ROI = 归因成交 / 全量推广花费。</p></article></section>
+    <section v-if="supportingErrors.length" class="store-overview-status warning" role="status"><Activity :size="16" /><div><strong>部分经营结构暂不可用</strong><small>{{ supportingErrors.join('、') }}，其余指标不受影响。</small></div></section>
+    <section class="store-overview-grid store-overview-grid-lower"><article class="store-overview-panel"><header><div><h2>推广花费与归因成交</h2></div><span v-if="promotionCoverage?.status !== 'complete'">覆盖 {{ number(promotionCoverage?.covered_days || 0) }} 天</span></header><BusinessChart v-if="dashboard.promotion_daily_metrics.some((item) => item.spend > 0)" :option="spendTrendOption" ariaLabel="全量推广花费和推广归因成交趋势" :height="300" /><EmptyState v-else title="暂无推广数据" detail="当前区间没有推广日报。" /></article><article class="store-overview-panel store-efficiency-panel"><header><div><h2>推广与退款</h2></div><Target :size="18" /></header><div class="store-efficiency-main"><span>推广费比</span><strong>{{ ratio(summary.promotion_fee_ratio) }}</strong><small>全量推广花费 / 支付金额</small></div><div class="store-efficiency-pairs"><div><span>推广 ROI</span><strong>{{ summary.promotion_roi.toFixed(2) }}x</strong></div><div><span>归因成交</span><strong>{{ currency(summary.promotion_attributed_paid_amount) }}</strong></div><div><span>退款率</span><strong>{{ ratio(refundRate) }}</strong></div><div><span>净支付率</span><strong>{{ ratio(summary.paid_amount ? summary.net_paid_amount / summary.paid_amount * 100 : 0) }}</strong></div></div><p>推广费比 = 全量推广花费 / 支付金额；推广 ROI = 归因成交 / 全量推广花费。</p></article></section>
 
     <section class="store-overview-panel overview-structure-panel">
       <header><div><p>经营结构</p><h2>渠道贡献、直播结构与客户结构</h2></div><span>{{ supportingLoading ? "正在汇总结构数据" : "金额口径" }}</span></header>
       <div class="overview-structure-grid">
         <article class="overview-structure-block overview-channel-block"><div class="overview-block-heading"><div><strong>渠道贡献率</strong><small>各渠道归因成交 / 全店支付</small></div><Megaphone :size="17" /></div><BusinessChart v-if="channelContributions.length" :option="channelContributionOption" ariaLabel="各渠道归因成交占全店支付贡献率" :height="278" /><EmptyState v-else title="暂无渠道归因" detail="当前范围没有可用渠道成交数据。" /><p class="overview-structure-note">会员、CPS、直播、百补、内容和秒杀归因可能重叠，百分比不可相加；直播内部结构单独按 100% 计算。</p></article>
         <article class="overview-structure-block"><div class="overview-block-heading"><div><strong>直播内部结构</strong><small>店播 / 达播占直播成交</small></div><Video :size="17" /></div><div v-if="liveStructure.some((item) => item.amount > 0)" class="overview-share-stack"><div v-for="item in liveStructure" :key="item.label" class="overview-share-row"><div><span>{{ item.label }}</span><strong>{{ currency(item.amount) }}</strong></div><i><b :style="{ width: `${Math.min(item.share, 100)}%`, background: item.color }"></b></i><em>{{ item.share.toFixed(1) }}%</em></div><footer>直播合计 {{ currency(analysis?.live.paid_amount ?? 0) }}</footer></div><EmptyState v-else title="暂无直播成交" detail="当前范围没有直播成交归因。" /></article>
-        <article class="overview-structure-block"><div class="overview-block-heading"><div><strong>客户成交结构</strong><small>新访 / 未购回访 / 已购回访</small></div><UsersRound :size="17" /></div><div v-if="customerStructure.length" class="overview-share-stack"><div v-for="item in customerStructure" :key="item.key" class="overview-share-row"><div><span>{{ item.label }}</span><strong>{{ currency(item.paid_amount) }}</strong></div><i><b :style="{ width: `${Math.min(item.share, 100)}%`, background: item.color }"></b></i><em>{{ item.share.toFixed(1) }}%</em></div><footer>客户分析有效 {{ customerCoverage.days }} 天<span v-if="customerCoverage.start">（{{ shortDate(customerCoverage.start) }}–{{ shortDate(customerCoverage.end || customerCoverage.start) }}）</span></footer></div><EmptyState v-else title="暂无客户结构" detail="客户日报未覆盖当前范围。" /></article>
+        <article class="overview-structure-block"><div class="overview-block-heading"><div><strong>客户成交结构</strong><small>新访 / 未购回访 / 已购回访</small></div><UsersRound :size="17" /></div><div v-if="customerStructure.length" class="overview-share-stack"><div v-for="item in customerStructure" :key="item.key" class="overview-share-row"><div><span>{{ item.label }}</span><strong>{{ currency(item.paid_amount) }}</strong></div><i><b :style="{ width: `${Math.min(item.share, 100)}%`, background: item.color }"></b></i><em>{{ item.share.toFixed(1) }}%</em></div><footer v-if="customerCoverage.days !== dashboard.period.expected_days">客户数据覆盖 {{ customerCoverage.days }}/{{ dashboard.period.expected_days }} 天<span v-if="customerCoverage.start">（{{ shortDate(customerCoverage.start) }}–{{ shortDate(customerCoverage.end || customerCoverage.start) }}）</span></footer></div><EmptyState v-else title="暂无客户结构" detail="客户日报未覆盖当前范围。" /></article>
       </div>
     </section>
 
     <section class="store-overview-panel overview-product-structure-panel">
-      <header><div><p>商品结构</p><h2>装型与系列销售占比</h2></div><span><PackageCheck :size="14" /> {{ products.length ? `${products.length} 个商品` : "读取中" }}</span></header>
+      <header><div><h2>商品结构：装型与系列销售占比</h2></div><span><PackageCheck :size="14" /> {{ products.length ? `${products.length} 个商品` : "读取中" }}</span></header>
       <div class="overview-product-structure">
         <div class="overview-product-structure-column overview-positioning-column">
           <div class="overview-block-heading"><div><strong>装型销售占比</strong><small>全店商品支付金额为 100%</small></div></div>
@@ -337,6 +439,12 @@ const previousSalesBridgeInput = computed(() => ({
       </div>
     </section>
 
+    <BusinessActionTable :rows="transactionActions" eyebrow="经营诊断" title="优先排查对象" note="金额贡献、退款与转化异常" />
+
     <section class="store-overview-panel store-daily-panel"><header><div><h2>每日经营数据</h2></div><span>{{ dailyRows.length }} 个统计日</span></header><div v-if="dailyRows.length" class="store-daily-table"><div class="store-daily-row store-daily-head"><span>日期</span><span>支付金额</span><span>退款</span><span>净支付</span><span>访客</span><span>转化率</span><span>推广花费</span><span>费比</span><span>推广 ROI</span></div><div v-for="item in pagedDailyRows" :key="item.statDate" class="store-daily-row" :class="{ 'is-missing': !item.store }"><strong>{{ item.statDate }}</strong><span>{{ item.store ? currency(item.store.paid_amount) : "--" }}</span><span>{{ item.store ? currency(item.store.refund_amount) : "--" }}</span><span>{{ item.store ? currency(item.store.paid_amount - item.store.refund_amount) : "--" }}</span><span>{{ item.store ? number(item.store.visitors) : "--" }}</span><span>{{ item.store ? ratio(item.store.conversion_rate) : "--" }}</span><span>{{ item.promotion ? currency(item.promotion.spend) : "--" }}</span><span>{{ item.store && item.promotion && item.store.paid_amount ? ratio(item.promotion.spend / item.store.paid_amount * 100) : "--" }}</span><span>{{ item.promotion?.spend ? `${(item.promotion.paid_amount / item.promotion.spend).toFixed(2)}x` : "--" }}</span></div></div><footer v-if="dailyRows.length" class="daily-pagination"><div><span>显示 {{ dailyPageStart }}–{{ dailyPageEnd }} / {{ dailyRows.length }} 天</span><label>每页<select v-model.number="dailyPageSize"><option :value="10">10</option><option :value="20">20</option><option :value="30">30</option></select></label></div><div><button type="button" :disabled="dailyPage <= 1" @click="dailyPage -= 1">上一页</button><span>第 {{ dailyPage }} / {{ dailyPageCount }} 页</span><button type="button" :disabled="dailyPage >= dailyPageCount" @click="dailyPage += 1">下一页</button></div></footer><EmptyState v-else title="暂无日报" detail="当前区间没有有效统计日。" /></section>
   </section>
 </template>
+
+<style scoped>
+.overview-panel-actions { display: flex; align-items: center; gap: var(--space-3); flex: 0 0 auto; }
+</style>

@@ -4,11 +4,12 @@ import argparse
 import json
 import os
 import sys
+import threading
 from datetime import date
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -33,6 +34,15 @@ DEFAULT_QUERY_PARAMS = {
 }
 
 
+def brandsearch_browser_fallback_port(source: str, port: int) -> int | None:
+    value = str(port) if source == "drissionpage" else os.getenv("ECHO_BATCH_BRANDSEARCH_BROWSER_PORT", "")
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    return parsed if 1 <= parsed <= 65535 else None
+
+
 def fetch_brandsearch_report(
     *,
     business_day: date,
@@ -42,6 +52,7 @@ def fetch_brandsearch_report(
     product_id: str = DEFAULT_PRODUCT_ID,
     query_params: dict[str, str] | None = None,
     timeout: int = 30,
+    browser_port: int | None = None,
 ) -> tuple[int, int | None, str | None, int]:
     params = dict(DEFAULT_QUERY_PARAMS)
     if query_params:
@@ -85,9 +96,56 @@ def fetch_brandsearch_report(
         response_body = exc.read()
         status = exc.code
 
+    if _response_status(response_body)[1] == "non-json response" and browser_port is not None:
+        try:
+            status, response_body = _fetch_in_brandsearch_tab(
+                browser_port, request.full_url, timeout=timeout,
+            )
+        except RuntimeError:
+            output.write_bytes(response_body)
+            raise
     output.write_bytes(response_body)
     code, message = _response_status(response_body)
     return status, code, message, len(response_body)
+
+
+def _fetch_in_brandsearch_tab(browser_port: int, url: str, *, timeout: int) -> tuple[int, bytes]:
+    from app.integrations.session.core import DrissionPageBrowser, RuntimeSessionUnavailable, open_browser_platform_session
+
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or f"{parsed.scheme}://{parsed.netloc}{parsed.path}" != BRANDSEARCH_REPORT_URL:
+        raise ValueError("品销宝浏览器回退只支持已登记的只读报表接口。")
+    browser = DrissionPageBrowser(browser_port)
+    tab = browser.find_tab(("branding.taobao.com",))
+    if tab is None:
+        open_browser_platform_session(browser_port, "brandsearch", timeout=timeout, keep_open_on_success=True)
+        tab = browser.find_tab(("branding.taobao.com",))
+    if tab is None:
+        raise RuntimeSessionUnavailable("品销宝直连失败，且品牌专区页面未能打开。")
+    script = """(async () => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), %d);
+      try {
+        const response = await fetch(%s, {credentials: 'include', signal: controller.signal});
+        return {status: response.status, body: await response.text()};
+      } catch (_) { return {error: 'request_failed'}; }
+      finally { clearTimeout(timer); }
+    })()""" % (max(1000, timeout * 1000), json.dumps(url))
+    result: list[object] = []
+
+    def evaluate() -> None:
+        try:
+            result.append(tab.run_cdp("Runtime.evaluate", expression=script, awaitPromise=True, returnByValue=True))
+        except Exception:
+            result.append(None)
+
+    worker = threading.Thread(target=evaluate, daemon=True, name="brandsearch-browser-fetch")
+    worker.start()
+    worker.join(timeout=max(1, timeout) + 5)
+    value = result[0].get("result", {}).get("value") if result and isinstance(result[0], dict) else None
+    if worker.is_alive() or not isinstance(value, dict) or not isinstance(value.get("body"), str):
+        raise RuntimeSessionUnavailable("品销宝页面内报表请求失败，请检查登录和网络状态。")
+    return int(value["status"]), value["body"].encode("utf-8")
 
 
 def _response_status(response_body: bytes) -> tuple[int | None, str | None]:
@@ -149,6 +207,7 @@ def main() -> int:
         product_id=args.product_id,
         query_params=dict(runtime.query_params),
         timeout=args.timeout,
+        browser_port=brandsearch_browser_fallback_port(args.session_source, args.browser_port),
     )
     print(
         json.dumps(

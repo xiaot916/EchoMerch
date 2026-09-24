@@ -94,7 +94,10 @@ def main() -> int:
 def _fetch_day(day: date, args: argparse.Namespace, cookie: str) -> tuple[Path, int, int, str]:
     directory = args.output_dir / day.isoformat(); directory.mkdir(parents=True, exist_ok=True); payloads: list[dict[str, object]] = []; total_rows = 0; stop_reason = "max_pages"
     for page in range(1, args.max_pages + 1):
-        output = directory / f"page_{page:04d}.json"; result = fetch_taobao_flash_sale_items(day=day, output=output, cookie=cookie, page=page, page_size=args.page_size, timeout=args.timeout)
+        output = directory / f"page_{page:04d}.json"; result = fetch_taobao_flash_sale_items(
+            day=day, output=output, cookie=cookie, page=page, page_size=args.page_size,
+            timeout=args.timeout, browser_port=args.browser_port if args.session_source == "drissionpage" else None,
+        )
         if not result.ok: raise RuntimeError(f"page {page} fetch failed: HTTP {result.status}, code {result.code}, message {result.message}")
         payload = json.loads(output.read_text(encoding="utf-8")); page_rows, count = _page_metadata(payload); payloads.append(payload); total_rows += len(page_rows)
         if not page_rows: stop_reason = "no_more_rows"; break

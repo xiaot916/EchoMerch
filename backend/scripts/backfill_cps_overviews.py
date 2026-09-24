@@ -20,6 +20,7 @@ from app.integrations.tmall_session import (  # noqa: E402
     resolve_cps_runtime_context,
 )
 from app.modules.imports.crawl_run_store import CrawlRunStore  # noqa: E402
+from app.integrations.session.cps import browser_fallback_port  # noqa: E402
 from app.warehouse.store import WarehouseStore  # noqa: E402
 from scripts.fetch_cps_overview import fetch_cps_overview  # noqa: E402
 
@@ -93,6 +94,7 @@ def main() -> int:
                     cookie=runtime.session.cookie_header if runtime else "",
                     tb_token=runtime.tb_token if runtime else "",
                     timeout=args.timeout,
+                    browser_port=browser_fallback_port(args.session_source, args.browser_port),
                 )
                 if not 200 <= fetched[0] < 300 or fetched[1] not in (0, 200):
                     raise RuntimeError(f"fetch failed: HTTP {fetched[0]}, code {fetched[1]}, message {fetched[2]}")

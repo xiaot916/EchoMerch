@@ -19,6 +19,7 @@ from app.integrations.tmall_session import (  # noqa: E402
     add_session_source_arguments,
     resolve_runtime_session,
 )
+from app.integrations.session.sycm import sycm_browser_fallback_port  # noqa: E402
 from app.modules.imports.crawl_run_store import CrawlRunStore  # noqa: E402
 from app.warehouse.store import WarehouseStore  # noqa: E402
 from scripts.fetch_sycm_member_analysis import (  # noqa: E402
@@ -124,6 +125,7 @@ def main() -> int:
                         cookie=session.cookie_header,
                         token=args.token,
                         timeout=args.timeout,
+                        browser_port=sycm_browser_fallback_port(args.session_source, args.browser_port),
                     )
                     if not fetched.ok:
                         raise RuntimeError(f"{section} fetch failed: HTTP {fetched.status}, code {fetched.code}, message {fetched.message}")

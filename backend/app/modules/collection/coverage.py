@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Literal
 
 from app.core.local_database import (
@@ -20,6 +21,7 @@ from app.core.local_database import (
     q,
 )
 from app.modules.collection.registry import CollectionDataset
+from app.modules.collection.snapshot_quality import current_price_snapshot_error
 
 
 CoverageState = Literal[
@@ -38,6 +40,14 @@ DEFAULT_COVERAGE_WINDOW_DAYS = 30
 # constraints mirror the API's table-level coverage checks and deliberately live
 # here so the planner cannot disagree with the status page.
 REQUIRED_TABLE_FILTERS: dict[str, str] = {
+    "store_daily_sycm_home_board": (
+        ' and "商品体验分" is not null'
+        ' and "物流体验分" is not null'
+        ' and "服务体验分" is not null'
+        ' and "退款体验分" is not null'
+        ' and "纠纷体验分" is not null'
+        ' and "主营类目ID" is not null'
+    ),
     "store_daily_customer_overviews": (
         ' and "店铺客户数" is not null'
         ' and "客户新访" is not null'
@@ -182,6 +192,11 @@ def resolve_dataset_day(
         _table_day_state(conn, dataset, table, business_day=business_day, store_id=store_id)
         for table in dataset.tables
     ]
+    if dataset.key == "taobao_operational_snapshots" and store_id == 1:
+        database_file = next((str(row[2]) for row in conn.execute("pragma database_list") if row[1] == "main"), "")
+        if database_file and current_price_snapshot_error(Path(database_file), business_day):
+            has_rows = any(state != "missing" for state in table_states)
+            return DatasetDayResolution(business_day, "partial" if has_rows else "failed", has_partial_rows=has_rows)
     # A QPS response means the platform stopped a paginated read. A previous
     # snapshot can still be present for the date, but it is not proof that the
     # interrupted refresh reached every page.

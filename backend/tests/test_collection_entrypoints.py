@@ -192,6 +192,24 @@ def test_cps_collection_preflight_checks_sycm_then_cps(
     assert checked == ["sycm", "cps"]
 
 
+def test_cps_items_alone_also_checks_cps_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checked: list[str] = []
+
+    def fake_probe(_port: int, code: str, **_kwargs: object) -> BrowserPlatformSession:
+        checked.append(code)
+        return BrowserPlatformSession(
+            code=code, name=code, status="authenticated", detail="已登录",
+            authenticated=True,
+        )
+
+    monkeypatch.setattr(collection_routes, "open_browser_platform_session", fake_probe)
+    collection_routes._preflight_collection_sessions(["cps_items"])
+
+    assert checked == ["sycm", "cps"]
+
+
 def test_review_collection_starts_browser_and_runs_background_task(
     route_app: FastAPI,
     monkeypatch: pytest.MonkeyPatch,

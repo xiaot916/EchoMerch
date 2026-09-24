@@ -99,6 +99,20 @@ def _raise_for_platform_error(payload: Any) -> None:
     raise JackyunIntegrationError(f"吉客云库存接口返回业务错误（{code}）：{str(message or '未知错误')[:160]}")
 
 
+def _platform_modified_at(value: Any) -> datetime | None:
+    """ERP goods timestamps may be milliseconds or an ISO-like local time."""
+    try:
+        if isinstance(value, (int, float)) or (isinstance(value, str) and value.isdigit()):
+            numeric = float(value)
+            return datetime.fromtimestamp(numeric / 1000 if numeric > 10_000_000_000 else numeric, SHANGHAI_TZ)
+        if isinstance(value, str) and value.strip():
+            parsed = datetime.fromisoformat(value.strip().replace(" ", "T"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=SHANGHAI_TZ)
+    except (OverflowError, ValueError, OSError):
+        pass
+    return None
+
+
 class JackyunClient:
     def __init__(
         self,
@@ -483,6 +497,8 @@ class JackyunClient:
             rows.extend(page_rows)
             if len(page_rows) < page_size:
                 break
+        else:
+            raise JackyunIntegrationError("库存结果超过 100 页上限；未覆盖旧快照，请缩小采集范围")
         return rows
 
     def fetch_package_products(self, store_id: int) -> list[dict[str, Any]]:
@@ -514,6 +530,8 @@ class JackyunClient:
             rows.extend(page_rows)
             if len(page_rows) < page_size:
                 break
+        else:
+            raise JackyunIntegrationError("组合主档超过 100 页上限；未替换上次成功数据")
         return rows
 
     def fetch_packages(self, store_id: int) -> list[dict[str, Any]]:
@@ -554,6 +572,8 @@ class JackyunClient:
             rows.extend(page_rows)
             if len(page_rows) < page_size:
                 break
+        else:
+            raise JackyunIntegrationError("普通货品主档超过 100 页上限；未替换上次成功数据")
         return rows
 
     def fetch_package_components(self, package_goods_id: str) -> list[dict[str, Any]]:
@@ -810,6 +830,7 @@ class JackyunInventorySyncService:
         goods_status = "not_configured"
         package_status = "not_configured"
         goods_count = package_count = component_count = 0
+        component_reused_count = component_fetched_count = 0
         errors: list[str] = []
 
         if self.client.config.jackyun_goods_url:
@@ -829,12 +850,23 @@ class JackyunInventorySyncService:
             try:
                 products = self.client.fetch_package_products(store_id)
                 if products:
+                    reusable = self.inventory.reusable_package_components(store_id=store_id)
                     records: list[dict[str, Any]] = []
                     for product in products:
                         goods_id = _first_nonempty(product, ("goodsId", "goods_id", "id"))
                         if not goods_id:
                             raise JackyunIntegrationError("组合货品主档缺少 goodsId，无法查询组成明细")
-                        records.append({"product": product, "components": self.client.fetch_package_components(str(goods_id))})
+                        sku_id = _first_nonempty(product, ("skuId", "sku_id"))
+                        cached = reusable.get((str(goods_id), str(sku_id or "")))
+                        modified = _platform_modified_at(_first_nonempty(product, ("gmtModified", "gmt_modified")))
+                        synced = _platform_modified_at(cached[0]) if cached else None
+                        if cached and cached[1] and modified and synced and modified <= synced:
+                            components = cached[1]
+                            component_reused_count += 1
+                        else:
+                            components = self.client.fetch_package_components(str(goods_id))
+                            component_fetched_count += 1
+                        records.append({"product": product, "components": components})
                     package_count, component_count = self.inventory.replace_package_master(store_id=store_id, records=records)
                     package_status = "success"
                 else:
@@ -857,6 +889,8 @@ class JackyunInventorySyncService:
             "goods_status": goods_status, "package_status": package_status,
             "goods_count": goods_count, "package_count": package_count,
             "component_count": component_count,
+            "component_reused_count": component_reused_count,
+            "component_fetched_count": component_fetched_count,
         }
 
     def run_due(self) -> list[dict[str, Any]]:

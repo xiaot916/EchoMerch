@@ -24,6 +24,7 @@ from app.warehouse.store import WarehouseStore  # noqa: E402
 from scripts.fetch_brandsearch_report import (  # noqa: E402
     BRANDSEARCH_REPORT_HOME,
     DEFAULT_PRODUCT_ID,
+    brandsearch_browser_fallback_port,
     fetch_brandsearch_report,
 )
 
@@ -130,6 +131,7 @@ def main() -> int:
                     product_id=args.product_id,
                     query_params=dict(runtime.query_params) if runtime else {},
                     timeout=args.timeout,
+                    browser_port=brandsearch_browser_fallback_port(args.session_source, args.browser_port),
                 )
                 if not 200 <= status < 300:
                     raise RuntimeError(f"fetch failed: HTTP {status}, message {message}")

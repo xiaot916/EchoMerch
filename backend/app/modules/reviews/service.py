@@ -12,11 +12,13 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from app.core.config import settings
 from app.core.local_database import LocalDatabase
 from app.integrations.tmall_session import RuntimeSession, RuntimeSessionUnavailable, resolve_runtime_session
+from app.integrations.session.helpers import browser_cookie_headers_for_urls
 from app.warehouse.mtop_sign import sign_mtop_data
 from app.modules.reviews.analyzer import ReviewAnalyzer
 from app.modules.collection.locks import active_daily_batch, active_feedback_run
@@ -514,6 +516,7 @@ class ReviewService:
     def _collect_ask_pages(self, *, mode: str, max_pages: int) -> dict[str, int | str]:
         session = self._resolve_collection_session(
             home_url="https://myseller.taobao.com/home.htm/comment-manage/ask-all?current=1&pageSize=10",
+            request_url=ASK_API_URL,
         )
         cookie_map = self._cookie_map(session.cookie_header)
         m_h5_tk = cookie_map.get("_m_h5_tk") or cookie_map.get("*m_h5_tk*") or cookie_map.get("m_h5_tk")
@@ -578,12 +581,25 @@ class ReviewService:
         try:
             with urlopen(request, timeout=30) as response:
                 payload = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            if exc.code == 431:
+                raise ReviewCollectionError(
+                    "淘宝问大家接口拒绝过大的 Cookie 请求头；请使用已登录的采集浏览器重试，"
+                    "不要配置包含多个平台 Cookie 的环境变量。"
+                ) from exc
+            raise ReviewCollectionError(f"淘宝问大家接口请求失败（第 {page} 页）：HTTP {exc.code}") from exc
         except Exception as exc:
             raise ReviewCollectionError(f"淘宝问大家接口请求失败（第 {page} 页）：{exc}") from exc
-        if payload.get("ret") and any("成功" not in str(value) and "调用成功" not in str(value) for value in payload.get("ret", [])):
+        if not isinstance(payload, dict):
+            raise ReviewCollectionError("淘宝问大家接口返回格式异常，请检查登录状态后重试。")
+        if payload.get("ret") and any("成功" not in str(value) and "SUCCESS" not in str(value).upper() for value in payload.get("ret", [])):
             raise ReviewCollectionError("淘宝问大家接口返回错误：" + "；".join(map(str, payload.get("ret", []))))
-        data = payload.get("data", {}).get("data", {})
-        return data.get("dataSource", []) if isinstance(data.get("dataSource"), list) else []
+        outer = payload.get("data")
+        data = outer.get("data") if isinstance(outer, dict) else None
+        items = data.get("dataSource") if isinstance(data, dict) else None
+        if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+            raise ReviewCollectionError("淘宝问大家接口未返回问题列表，不能将异常响应当作空页；请检查登录状态后重试。")
+        return items
 
     def _parse_ask_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
         module = item.get("askAndAnswerModule") if isinstance(item.get("askAndAnswerModule"), dict) else {}
@@ -716,22 +732,9 @@ class ReviewService:
                 break
         return {"pages": pages, "fetched": fetched, "inserted": inserted, "updated": updated, "skipped": skipped, "reason": reason}
 
-    def _resolve_collection_session(self, *, home_url: str) -> RuntimeSession:
-        """Resolve the review session, falling back to the local logged-in browser.
-
-        Older deployments default to an environment cookie.  On this machine the
-        supported session is the attached Chrome profile, so a missing env value
-        should not make review and ask collection fail when that browser is ready.
-        """
-        if settings.tmall_session_source != "env":
-            return resolve_runtime_session(
-                source=settings.tmall_session_source,
-                cookie_env=settings.tmall_cookie_env,
-                browser_port=settings.tmall_browser_port,
-                home_url=home_url,
-            )
-
-        if os.getenv(settings.tmall_cookie_env, "").strip():
+    def _resolve_collection_session(self, *, home_url: str, request_url: str = API_URL) -> RuntimeSession:
+        """Use only cookies Chrome would send to the MTop endpoint."""
+        if settings.tmall_session_source == "env" and os.getenv(settings.tmall_cookie_env, "").strip():
             return resolve_runtime_session(
                 source="env",
                 cookie_env=settings.tmall_cookie_env,
@@ -740,11 +743,15 @@ class ReviewService:
             )
 
         try:
-            return resolve_runtime_session(
+            cookie_header = browser_cookie_headers_for_urls(
+                settings.tmall_browser_port,
+                (request_url,),
+                expected_hosts=("myseller.taobao.com",),
+            )[request_url]
+            return RuntimeSession(
+                cookie_header=cookie_header,
                 source="drissionpage",
-                cookie_env=settings.tmall_cookie_env,
-                browser_port=settings.tmall_browser_port,
-                home_url=home_url,
+                cookie_count=len(self._cookie_map(cookie_header)),
             )
         except RuntimeSessionUnavailable as browser_exc:
             raise ReviewCollectionError(
@@ -784,13 +791,23 @@ class ReviewService:
         try:
             with urlopen(request, timeout=30) as response:
                 payload = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            if exc.code == 431:
+                raise ReviewCollectionError(
+                    "淘宝评价接口拒绝过大的 Cookie 请求头；请使用已登录的采集浏览器重试，"
+                    "不要配置包含多个平台 Cookie 的环境变量。"
+                ) from exc
+            raise ReviewCollectionError(f"淘宝评价接口请求失败（第 {page} 页）：HTTP {exc.code}") from exc
         except Exception as exc:
             raise ReviewCollectionError(f"淘宝评价接口请求失败（第 {page} 页）：{exc}") from exc
         if not isinstance(payload, dict):
             raise ReviewCollectionError("淘宝评价接口返回格式不是 JSON 对象。")
         if payload.get("ret") and any("成功" not in str(value) for value in payload.get("ret", [])):
             raise ReviewCollectionError("淘宝评价接口返回错误：" + "；".join(map(str, payload.get("ret", []))))
-        return self._extract_items(payload)
+        items = self._extract_items(payload)
+        if items is None:
+            raise ReviewCollectionError("淘宝评价接口未返回评价列表，不能将异常响应当作空页；请检查登录状态后重试。")
+        return items
 
     @staticmethod
     def _collection_ranges(
@@ -1001,19 +1018,19 @@ class ReviewService:
         return conn.execute("select 1 from sqlite_master where type='table' and name=?", (name,)).fetchone() is not None
 
     @staticmethod
-    def _extract_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
-        def walk(value: Any) -> list[dict[str, Any]]:
+    def _extract_items(payload: dict[str, Any]) -> list[dict[str, Any]] | None:
+        def walk(value: Any) -> list[dict[str, Any]] | None:
             if isinstance(value, dict):
                 for key in ("dataSource", "list", "items", "results"):
                     if isinstance(value.get(key), list) and all(isinstance(item, dict) for item in value[key]): return value[key]
                 for child in value.values():
                     found = walk(child)
-                    if found: return found
+                    if found is not None: return found
             elif isinstance(value, list):
                 for child in value:
                     found = walk(child)
-                    if found: return found
-            return []
+                    if found is not None: return found
+            return None
         return walk(payload)
 
     @staticmethod

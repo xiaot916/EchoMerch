@@ -19,9 +19,6 @@ def get_capabilities(_: Principal = Depends(require_permission("data.manage"))) 
             "analytics.traffic",
             "analytics.promotions",
             "captures.offline_analysis",
-            "contracts.catalog",
-            "imports.daily_dry_run",
-            "imports.run_registry",
             "warehouse.platform_store",
             "operations.control_center",
         ],
@@ -34,7 +31,6 @@ def get_capabilities(_: Principal = Depends(require_permission("data.manage"))) 
         ],
         safety_rules=[
             "Legacy database adapters execute read-only SELECT queries.",
-            "HTTP APIs expose contracts, dry-run plans, and summaries only.",
             "Crawler execution and platform mutation are disabled until an audited worker is added.",
             "Batch operations must follow draft -> preview -> validate -> confirm -> execute -> audit.",
         ],

@@ -153,7 +153,7 @@ const bybtReconcileRate = computed(() => {
   return bybtAmountTotal.value / Number(value.value.paid_amount) * 100
 })
 const dailyHeading = computed(() => isBybt.value
-  ? `已覆盖${Number(value.value.covered_days ?? 0)}/${Number(value.value.expected_days ?? daily.value.length)}天`
+  ? `${daily.value.length} 个统计日`
   : `${daily.value.length} 个统计日`)
 const bybtItemsRangeLabel = computed(() => {
   const coverage = bybtItemsCoverage.value

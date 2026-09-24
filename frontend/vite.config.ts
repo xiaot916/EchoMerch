@@ -24,18 +24,4 @@ export default defineConfig({
       "/api": apiProxyTarget,
     },
   },
-  build: {
-    rollupOptions: {
-      output: {
-        manualChunks: {
-          echartsCore: [
-            "echarts/core",
-            "echarts/components",
-            "echarts/renderers",
-          ],
-          echartsCharts: ["echarts/charts"],
-        },
-      },
-    },
-  },
 })

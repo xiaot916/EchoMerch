@@ -17,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "backend"))
 
 from app.integrations.tmall_session import add_session_source_arguments, resolve_runtime_session  # noqa: E402
+from app.integrations.session.sycm import fetch_sycm_browser_json, sycm_browser_fallback_port  # noqa: E402
 
 
 SECTION_CONFIG = {
@@ -103,6 +104,7 @@ def fetch_sycm_member_analysis(
     cookie: str,
     token: str = "",
     timeout: int = 30,
+    browser_port: int | None = None,
 ) -> FetchResult:
     config = SECTION_CONFIG[section]
     params = {
@@ -155,6 +157,19 @@ def fetch_sycm_member_analysis(
         status = exc.code
 
     try:
+        json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        if browser_port is not None:
+            try:
+                status, body = fetch_sycm_browser_json(
+                    browser_port, request.full_url, timeout=timeout,
+                    card_id=request.get_header("Onetrace-card-id") or "",
+                )
+            except RuntimeError:
+                output.write_bytes(body)
+                raise
+
+    try:
         payload = json.loads(body.decode("utf-8"))
         output_body = json.dumps(
             _scrub_sensitive(payload),
@@ -198,6 +213,7 @@ def main() -> int:
         output=args.output,
         cookie=session.cookie_header,
         token=args.token,
+        browser_port=sycm_browser_fallback_port(args.session_source, args.browser_port),
     )
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
     return 0 if result.ok else 1

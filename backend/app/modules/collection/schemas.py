@@ -24,6 +24,15 @@ class BrowserHealth(BaseModel):
     platforms: list[PlatformSessionStatus] = Field(default_factory=list)
 
 
+class SellerLoginStatus(BaseModel):
+    status: str
+    detail: str
+    browser_connected: bool = False
+    debug_port: int
+    login_url: str
+    page_url: str | None = None
+
+
 class InventoryCredentialStatus(BaseModel):
     configured: bool = False
     status: str = "not_configured"

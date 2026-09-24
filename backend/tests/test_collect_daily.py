@@ -3,8 +3,11 @@ import sqlite3
 import subprocess
 from datetime import date
 
+import pytest
+
 from scripts import collect_daily
 from scripts import collect_sycm_market
+from scripts import backfill_taobao_operational_snapshots as operational_snapshots
 
 
 def test_plan_defaults_to_yesterday_and_expands_detail_workers(monkeypatch, capsys) -> None:
@@ -63,9 +66,58 @@ def test_operational_snapshots_are_always_refreshed() -> None:
     assert "--refresh-existing" in command
 
 
+def test_operational_snapshot_uses_endpoint_cookies_not_sycm_batch_cookie() -> None:
+    assert collect_daily._batch_snapshot_key(
+        collect_daily.DATASET_BY_NAME["taobao_operational_snapshots"]
+    ) is None
+    assert collect_daily._batch_snapshot_key(
+        collect_daily.DATASET_BY_NAME["sycm_overviews"]
+    ) == "sycm"
+
+
+def test_snapshot_resume_never_expands_to_historical_days(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(collect_daily, "_resume_start_day", lambda **_kwargs: date(2026, 9, 1))
+    command = collect_daily._commands_for_spec(
+        collect_daily.DATASET_BY_NAME["taobao_operational_snapshots"],
+        day=date(2026, 9, 23), database_path=tmp_path / "warehouse.sqlite3",
+        session_source="drissionpage", cookie_env="SYCM_COOKIE", browser_port=9222,
+        refresh_existing=False, resume_from_latest=True,
+    )[0]
+    assert command[command.index("--start") + 1] == "2026-09-23"
+    assert command[command.index("--end") + 1] == "2026-09-23"
+
+
+def test_historical_snapshot_rejected_before_session_bootstrap(monkeypatch, tmp_path) -> None:
+    from app.modules.collection import dates
+
+    monkeypatch.setattr(dates, "today_in_shanghai", lambda: date(2026, 9, 23))
+    monkeypatch.setattr(collect_daily, "bootstrap_collection_sessions", lambda **_kwargs: pytest.fail("unexpected session read"))
+    with pytest.raises(ValueError, match="无法追溯"):
+        collect_daily.run_collection(
+            day=date(2026, 9, 22), dataset_names=["taobao_operational_snapshots"],
+            database_path=tmp_path / "warehouse.sqlite3", session_source="drissionpage",
+            cookie_env="SYCM_COOKIE", browser_port=9222,
+        )
+
+
+def test_operational_snapshot_worker_rejects_historical_day_before_database(monkeypatch, tmp_path) -> None:
+    from app.modules.collection import dates
+
+    monkeypatch.setattr(dates, "today_in_shanghai", lambda: date(2026, 9, 23))
+    monkeypatch.setattr("sys.argv", ["snapshot", "--start", "2026-09-22", "--end", "2026-09-22", "--database-path", str(tmp_path / "warehouse.sqlite3")])
+    with pytest.raises(ValueError, match="无法追溯"):
+        operational_snapshots.main()
+    assert not (tmp_path / "warehouse.sqlite3").exists()
+
+
+def test_default_report_selection_excludes_live_snapshot() -> None:
+    assert "taobao_operational_snapshots" not in collect_daily.DEFAULT_DATASET_NAMES
+
+
 def test_activity_calendar_is_always_refreshed() -> None:
     spec = collect_daily.DATASET_BY_NAME["sycm_activity_calendar"]
     assert spec.script == "backfill_sycm_activity_calendar.py"
+    assert collect_daily.DEFAULT_DATASET_NAMES.index("sycm_activity_calendar") < collect_daily.DEFAULT_DATASET_NAMES.index("cps_overviews")
     command = collect_daily.build_child_command(
         spec,
         day=date(2026, 8, 20),
@@ -78,6 +130,17 @@ def test_activity_calendar_is_always_refreshed() -> None:
 
     assert "--refresh-existing" in command
     assert command[command.index("--years") + 1] == "2026"
+
+
+def test_activity_calendar_resume_does_not_expand_annual_snapshot_to_missing_days(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(collect_daily, "_resume_start_day", lambda **_kwargs: date(2026, 9, 1))
+    command = collect_daily._commands_for_spec(
+        collect_daily.DATASET_BY_NAME["sycm_activity_calendar"],
+        day=date(2026, 9, 23), database_path=tmp_path / "warehouse.sqlite3",
+        session_source="drissionpage", cookie_env="SYCM_COOKIE", browser_port=9222,
+        refresh_existing=False, resume_from_latest=True,
+    )[0]
+    assert command[command.index("--start") + 1] == "2026-09-23"
 
 
 def test_daily_item_details_are_not_forced_into_snapshot_refresh_mode() -> None:

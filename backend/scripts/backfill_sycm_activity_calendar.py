@@ -18,6 +18,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "backend"))
 from app.core.config import settings  # noqa: E402
 from app.core.local_database import LocalDatabase  # noqa: E402
 from app.integrations.tmall_session import add_session_source_arguments, resolve_runtime_session  # noqa: E402
+from app.integrations.session.sycm import sycm_browser_fallback_port  # noqa: E402
 from app.modules.imports.crawl_run_store import CrawlRunAlreadyRunning, CrawlRunStore  # noqa: E402
 from app.warehouse.store import WarehouseStore  # noqa: E402
 from scripts.fetch_sycm_activity_calendar import FetchResult, fetch_sycm_activity_calendar  # noqa: E402
@@ -62,8 +63,8 @@ def main() -> int:
     _validate(args)
 
     years = _years_for_args(args.start, args.end, args.years)
-    run_start = date(years[0], 1, 1)
-    run_end = date(years[-1], 12, 31)
+    run_start = args.start or date(years[0], 1, 1)
+    run_end = args.end or date(years[-1], 12, 31)
     LocalDatabase(args.database_path).initialize_schema()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     log_path = args.output_dir / f"backfill_sycm_activity_calendar_{_stamp()}.jsonl"
@@ -101,6 +102,7 @@ def main() -> int:
     try:
         for index, year in enumerate(years, start=1):
             query_day = date(year, 1, 1)
+            record_day = args.end if args.end is not None and args.end.year == year else query_day
             response_path = _response_path(args.output_dir, year)
             try:
                 if args.reuse_response_files and response_path.exists():
@@ -118,6 +120,7 @@ def main() -> int:
                         cookie=session.cookie_header,
                         token=args.token,
                         timeout=args.timeout,
+                        browser_port=sycm_browser_fallback_port(args.session_source, args.browser_port),
                     )
                 if not fetch_result.ok:
                     raise RuntimeError(
@@ -128,7 +131,7 @@ def main() -> int:
 
                 result = warehouse.ingest_sycm_activity_calendar(
                     source_path=response_path,
-                    business_day=query_day,
+                    business_day=record_day,
                     store_name=args.store_name,
                     platform_store_id=args.platform_store_id,
                     http_status=fetch_result.status,
@@ -139,7 +142,7 @@ def main() -> int:
                 crawl_runs.record_day(
                     run_id=run_id,
                     store_id=args.store_id,
-                    business_day=query_day,
+                    business_day=record_day,
                     status="ingested",
                     metric_count=result.metric_count,
                 )
@@ -149,6 +152,7 @@ def main() -> int:
                         "run_id": run_id,
                         "year": year,
                         "query_day": query_day.isoformat(),
+                        "record_day": record_day.isoformat(),
                         "status": "ingested",
                         "fetch": asdict(fetch_result),
                         "metric_count": result.metric_count,
@@ -164,7 +168,7 @@ def main() -> int:
                 crawl_runs.record_day(
                     run_id=run_id,
                     store_id=args.store_id,
-                    business_day=query_day,
+                    business_day=record_day,
                     status="ingest_failed",
                     error_message=str(exc),
                 )

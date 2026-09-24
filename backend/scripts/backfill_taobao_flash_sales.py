@@ -134,6 +134,7 @@ def main() -> int:
                     output=output,
                     cookie=session.cookie_header if session else "",
                     timeout=args.timeout,
+                    browser_port=args.browser_port if args.session_source == "drissionpage" else None,
                 )
                 if not fetched.ok:
                     raise RuntimeError(f"fetch failed: HTTP {fetched.status}, code {fetched.code}, message {fetched.message}")

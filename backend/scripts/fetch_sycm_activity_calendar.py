@@ -17,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "backend"))
 
 from app.integrations.tmall_session import add_session_source_arguments, resolve_runtime_session  # noqa: E402
+from app.integrations.session.sycm import fetch_sycm_browser_json, sycm_browser_fallback_port  # noqa: E402
 
 
 SENSITIVE_KEYS = {"token", "cookie", "authorization"}
@@ -43,6 +44,7 @@ def fetch_sycm_activity_calendar(
     cookie: str,
     token: str = "",
     timeout: int = 30,
+    browser_port: int | None = None,
 ) -> FetchResult:
     params = {
         "actType": "0",
@@ -87,14 +89,26 @@ def fetch_sycm_activity_calendar(
 
     try:
         payload = json.loads(body.decode("utf-8"))
-        normalized = json.dumps(
-            _scrub_sensitive(payload), ensure_ascii=False, separators=(",", ":")
-        ).encode("utf-8")
-        code, message = _response_code_and_message(payload)
     except (UnicodeDecodeError, json.JSONDecodeError):
-        normalized = body
-        code = None
-        message = "non-json response"
+        if browser_port is None:
+            return FetchResult(status, None, "non-json response", str(output), 0)
+        status, body = fetch_sycm_browser_json(
+            browser_port, request.full_url, timeout=timeout, card_id="am-activity-calendar",
+        )
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return FetchResult(status, None, "non-json response from SYCM page", str(output), 0)
+
+    code, message = _response_code_and_message(payload)
+    if not (200 <= status < 300 and code in (0, 200)):
+        return FetchResult(status, code, message, str(output), 0)
+    root = payload.get("content") if isinstance(payload.get("content"), dict) else payload
+    if not isinstance(root.get("data"), (list, dict)):
+        return FetchResult(status, code, "missing activity calendar data", str(output), 0)
+    normalized = json.dumps(
+        _scrub_sensitive(payload), ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
     output.write_bytes(normalized)
     return FetchResult(status, code, message, str(output), len(normalized))
 
@@ -160,6 +174,7 @@ def main() -> int:
         cookie=session.cookie_header,
         token=args.token,
         timeout=args.timeout,
+        browser_port=sycm_browser_fallback_port(args.session_source, args.browser_port),
     )
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
     return 0 if result.ok else 1

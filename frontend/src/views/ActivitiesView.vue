@@ -24,6 +24,7 @@ import EmptyState from "@/components/EmptyState.vue"
 import MetricCard from "@/components/MetricCard.vue"
 import { fetchActivityCalendar, fetchDashboard, fetchStores } from "@/api"
 import { useDashboard } from "@/composables/useDashboard"
+import { baseValueAxis } from "@/lib/echartsTheme"
 import { currency, number, ratio } from "@/lib/format"
 import type { DashboardResponse, ProductMetric, StoreActivityCalendarEvent, TrafficMetric } from "@/types"
 
@@ -184,7 +185,7 @@ const chartOption = computed(() => ({
   tooltip: { trigger: "axis", formatter: (params: Array<{ dataIndex: number; value: number }>) => { const row = dailyRows.value[params[0]?.dataIndex ?? 0]; return `${row?.stat_date || ""}<br/>支付金额 ${currency(Number(params[0]?.value ?? 0))}${row?.activity ? "<br/>活动覆盖日" : ""}` } },
   grid: { left: 62, right: 24, top: 24, bottom: 34 },
   xAxis: { type: "category", data: dailyRows.value.map((item) => item.stat_date.slice(5)) },
-  yAxis: { type: "value", axisLabel: { formatter: "¥{value}" }, splitLine: { lineStyle: { color: "#edf1ef" } } },
+  yAxis: baseValueAxis({ axisLabel: { formatter: "¥{value}" } }),
   series: [{ type: "line", smooth: true, data: dailyRows.value.map((item) => ({ value: item.paid_amount, itemStyle: { color: item.activity ? "#e2a447" : "#35a979" }, symbolSize: item.activity ? 10 : 6 })), markArea: { itemStyle: { color: "rgba(226,164,71,.10)" }, data: rangeActivities.value.slice(0, 8).map((item) => { const start = activityStart(item) < (dashboard.value?.range_start || activityStart(item)) ? (dashboard.value?.range_start || activityStart(item)) : activityStart(item); const end = activityEnd(item) > (dashboard.value?.range_end || activityEnd(item)) ? (dashboard.value?.range_end || activityEnd(item)) : activityEnd(item); return [{ name: item.activity_name, xAxis: start.slice(5) }, { xAxis: end.slice(5) }] }) } }],
 }))
 
@@ -260,7 +261,7 @@ const stageChartOption = computed(() => ({
   tooltip: { trigger: "axis", valueFormatter: (value: number) => stageMetric.value === "visitors" ? number(value) : stageMetric.value === "paidAmount" || stageMetric.value === "customerUnitPrice" ? currency(value) : ratio(value) },
   grid: { left: 62, right: 24, top: 28, bottom: 34 },
   xAxis: { type: "category", data: snapshots.value.map((item) => item.label) },
-  yAxis: { type: "value", axisLabel: { formatter: (value: number) => stageMetric.value === "visitors" ? number(value) : stageMetric.value === "paidAmount" || stageMetric.value === "customerUnitPrice" ? `¥${value}` : `${value}%` }, splitLine: { lineStyle: { color: "#edf1ef" } } },
+  yAxis: baseValueAxis({ axisLabel: { formatter: (value: number) => stageMetric.value === "visitors" ? number(value) : stageMetric.value === "paidAmount" || stageMetric.value === "customerUnitPrice" ? `¥${value}` : `${value}%` } }),
   series: [{ type: "bar", barMaxWidth: 58, data: snapshots.value.map((item) => stageMetricValue(item)) }],
 }))
 
@@ -278,7 +279,7 @@ const timelineOption = computed(() => ({
   tooltip: { trigger: "axis", formatter: (params: Array<{ dataIndex: number }>) => { const row = timelineRows.value[params[0]?.dataIndex ?? 0]; return `${row?.date || ""}<br/>支付金额 ${currency(row?.paidAmount)}<br/>访客 ${number(row?.visitors)} · 买家 ${number(row?.buyers)}<br/>转化率 ${ratio(row?.conversionRate || 0)} · 客单价 ${currency(row?.customerUnitPrice)}<br/>全站推广场景花费 ${currency(row?.promotionCost)}` } },
   grid: { left: 62, right: 24, top: 28, bottom: 34 },
   xAxis: { type: "category", data: timelineRows.value.map((item) => item.date.slice(5)) },
-  yAxis: [{ type: "value", axisLabel: { formatter: "¥{value}" }, splitLine: { lineStyle: { color: "#edf1ef" } } }, { type: "value", axisLabel: { formatter: "¥{value}" }, splitLine: { show: false } }],
+  yAxis: [baseValueAxis({ axisLabel: { formatter: "¥{value}" } }), baseValueAxis({ axisLabel: { formatter: "¥{value}" }, splitLine: { show: false } })],
   series: [{ name: "支付金额", type: "line", smooth: true, data: timelineRows.value.map((item) => item.paidAmount), markArea: { itemStyle: { color: "rgba(226,164,71,.12)" }, data: windows.value?.during ? [[{ xAxis: windows.value.duringRange.start.slice(5) }, { xAxis: windows.value.duringRange.end.slice(5) }]] : [] } }, { name: "全站推广场景花费", type: "bar", yAxisIndex: 1, barMaxWidth: 12, data: timelineRows.value.map((item) => item.promotionCost) }],
 }))
 
@@ -319,10 +320,10 @@ const trafficOption = computed(() => ({
 const promotionChartOption = computed(() => ({
   color: ["#5b8def", "#35a979", "#e2a447"],
   tooltip: { trigger: "axis", formatter: (params: Array<{ seriesName: string; value: number | null }>) => params.map((item) => `${item.seriesName} ${item.seriesName === "归因 ROI" ? item.value === null ? "暂无" : `${Number(item.value).toFixed(2)}x` : currency(item.value)}`).join("<br/>") },
-  legend: { bottom: 0, itemWidth: 9, itemHeight: 9, textStyle: { color: "#75857c", fontSize: 9 } },
+  legend: { bottom: 0, itemWidth: 9, itemHeight: 9, textStyle: { color: "#75857c", fontSize: 12 } },
   grid: { left: 52, right: 42, top: 20, bottom: 42 },
   xAxis: { type: "category", data: snapshots.value.map((item) => item.label) },
-  yAxis: [{ type: "value", axisLabel: { formatter: (value: number) => `¥${Math.round(value / 10000)}万` }, splitLine: { lineStyle: { color: "#edf1ef" } } }, { type: "value", axisLabel: { formatter: "{value}x" }, splitLine: { show: false } }],
+  yAxis: [baseValueAxis({ axisLabel: { formatter: (value: number) => `¥${Math.round(value / 10000)}万` } }), baseValueAxis({ axisLabel: { formatter: "{value}x" }, splitLine: { show: false } })],
   series: [
     { name: "计划日均花费", type: "bar", barMaxWidth: 20, data: snapshots.value.map((item) => item.averagePlanSpend) },
     { name: "15 天归因日均成交", type: "bar", barMaxWidth: 20, data: snapshots.value.map((item) => item.averageAttributedPaidAmount) },

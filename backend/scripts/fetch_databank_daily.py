@@ -4,9 +4,11 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 from datetime import date
 from pathlib import Path
+from typing import Callable
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -71,7 +73,7 @@ def _homepage_query(path: str, day: date, *, brand_id: str, panel_type: str | No
     return "/api/paasapi?" + urlencode(values)
 
 
-def fetch_databank_daily(*, business_day: date, output: Path, cookie: str, csrf_token: str, timeout: int = 30, brand_id: str = "1917777264") -> tuple[int, int]:
+def fetch_databank_daily(*, business_day: date, output: Path, cookie: str, csrf_token: str, timeout: int = 30, brand_id: str = "1917777264", browser_port: int | None = None) -> tuple[int, int]:
     endpoints = {
         "core": _query(CORE_PATH, business_day),
         "volume": _query(VOLUME_PATH, business_day, data_type="all"),
@@ -110,15 +112,39 @@ def fetch_databank_daily(*, business_day: date, output: Path, cookie: str, csrf_
                 status = response.status
                 response_body = response.read()
         except HTTPError as exc:
+            raw_body = exc.read().decode("utf-8", errors="replace")
             payload[key] = {
                 "_echoMerchHttpStatus": exc.code,
-                "_echoMerchRawBody": exc.read().decode("utf-8", errors="replace"),
+                "_echoMerchRawBody": raw_body,
             }
             _write_payload(output, payload)
-            raise RuntimeError(f"品牌数据银行 {key} 请求失败: HTTP {exc.code}") from exc
+            raise RuntimeError(
+                f"品牌数据银行 {key} 请求失败: HTTP {exc.code} {_describe_bad_request(raw_body)}"
+            ) from exc
         try:
             payload[key] = json.loads(response_body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            if browser_port is not None:
+                direct_body = response_body
+                try:
+                    status, response_body = _fetch_in_existing_databank_tab(
+                        browser_port, path, timeout=timeout,
+                    )
+                    payload[key] = json.loads(response_body.decode("utf-8"))
+                    if not 200 <= status < 300:
+                        raise RuntimeError(f"品牌数据银行 {key} 浏览器请求失败: HTTP {status}")
+                    _write_payload(output, payload)
+                    continue
+                except (RuntimeError, UnicodeDecodeError, json.JSONDecodeError) as fallback_error:
+                    payload[key] = {
+                        "_echoMerchHttpStatus": status,
+                        "_echoMerchRawBody": direct_body.decode("utf-8", errors="replace"),
+                        "_echoMerchBrowserError": type(fallback_error).__name__,
+                    }
+                    _write_payload(output, payload)
+                    raise RuntimeError(
+                        f"品牌数据银行 {key} 直连非 JSON，浏览器内回退失败: {fallback_error}"
+                    ) from fallback_error
             payload[key] = {
                 "_echoMerchHttpStatus": status,
                 "_echoMerchRawBody": response_body.decode("utf-8", errors="replace"),
@@ -139,6 +165,136 @@ def fetch_databank_daily(*, business_day: date, output: Path, cookie: str, csrf_
     if endpoint_errors:
         raise RuntimeError("品牌数据银行接口返回异常: " + "; ".join(endpoint_errors))
     return status, len(payload)
+
+
+def _fetch_in_existing_databank_tab(browser_port: int, path: str, *, timeout: int) -> tuple[int, bytes]:
+    from app.integrations.session.core import DrissionPageBrowser, RuntimeSessionUnavailable
+
+    if not path.startswith("/api/paasapi?"):
+        raise ValueError("数据银行浏览器回退只支持已登记的只读报表接口。")
+    tab = DrissionPageBrowser(browser_port).find_tab(("databank.tmall.com",))
+    if tab is None:
+        raise RuntimeSessionUnavailable("数据银行直连失败，且没有已打开的数据银行页面。")
+    script = """(async () => {
+      const token = document.cookie.split('; ').find(part => part.startsWith('_tb_token_='))?.slice(11);
+      if (!token) return {error: 'missing_token'};
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), %d);
+      try {
+        const response = await fetch(%s, {
+          credentials: 'include', signal: controller.signal,
+          headers: {'x-csrf-token': decodeURIComponent(token), 'x-requested-with': 'XMLHttpRequest'},
+        });
+        return {status: response.status, body: await response.text()};
+      } catch (_) { return {error: 'request_failed'}; }
+      finally { clearTimeout(timer); }
+    })()""" % (max(1000, timeout * 1000), json.dumps(path))
+    result: list[object] = []
+
+    def evaluate() -> None:
+        try:
+            result.append(tab.run_cdp("Runtime.evaluate", expression=script, awaitPromise=True, returnByValue=True))
+        except Exception:
+            result.append(None)
+
+    worker = threading.Thread(target=evaluate, daemon=True, name="databank-browser-fetch")
+    worker.start()
+    worker.join(timeout=max(1, timeout) + 5)
+    value = result[0].get("result", {}).get("value") if result and isinstance(result[0], dict) else None
+    if worker.is_alive() or not isinstance(value, dict) or not isinstance(value.get("body"), str):
+        raise RuntimeSessionUnavailable("数据银行页面内报表请求失败，请确认登录和网络状态。")
+    return int(value["status"]), value["body"].encode("utf-8")
+
+
+# Platform-level envelope codes that mean "this request was not accepted",
+# not "the day has no data".  They are almost always produced by a stale
+# session/csrf snapshot captured before the browser finished logging in, so a
+# single session refresh + retry recovers them (verified live 2026-09-19).
+_STALE_SESSION_ERR_CODES = (
+    "477012030108",          # param illegal
+    "77000001001",           # For input string: ""
+    "4000000000000000000",
+)
+_STALE_SESSION_ERR_FRAGMENTS = (
+    "param illegal",
+    "for input string",
+    "login",
+    "not login",
+    "session",
+    "csrf",
+)
+
+
+def _describe_bad_request(raw_body: str) -> str:
+    """Summarise a failed Brand Data Bank envelope for the log line."""
+
+    try:
+        envelope = json.loads(raw_body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return raw_body.strip()[:200]
+    if isinstance(envelope, dict):
+        code = envelope.get("errCode")
+        message = envelope.get("errMsg") or envelope.get("message")
+        if code is not None or message:
+            return f"errCode={code}, errMsg={message or 'unknown'}"
+    return raw_body.strip()[:200]
+
+
+def is_stale_session_error(error: object) -> bool:
+    """Return True when a failure looks like a stale session/csrf snapshot."""
+
+    text = str(error or "").lower()
+    if any(code.lower() in text for code in _STALE_SESSION_ERR_CODES):
+        return True
+    return any(fragment in text for fragment in _STALE_SESSION_ERR_FRAGMENTS)
+
+
+def fetch_databank_daily_with_retry(
+    *,
+    business_day: date,
+    output: Path,
+    resolve_runtime: Callable[[], tuple[str, str]],
+    timeout: int = 30,
+    brand_id: str = "1917777264",
+    browser_port: int | None = None,
+    attempts: int = 2,
+) -> tuple[int, int]:
+    """Fetch one day, re-reading the live browser session when it looks stale.
+
+    The 08:48 scheduled runs of 2026-09-15..09-18 all failed with
+    ``errCode=477012030108 param illegal`` while identical parameters succeeded
+    against a freshly navigated tab.  That proves the request contract is fine
+    and the captured cookie/csrf snapshot had gone stale.  ``resolve_runtime``
+    is re-invoked (which re-navigates databank.tmall.com and re-reads
+    ``_tb_token_``) before the retry.
+    """
+
+    last_error: Exception | None = None
+    for attempt in range(max(attempts, 1)):
+        cookie, csrf_token = resolve_runtime()
+        try:
+            return fetch_databank_daily(
+                business_day=business_day,
+                output=output,
+                cookie=cookie,
+                csrf_token=csrf_token,
+                timeout=timeout,
+                brand_id=brand_id,
+                browser_port=browser_port,
+            )
+        except RuntimeError as exc:
+            last_error = exc
+            if attempt + 1 >= attempts or not is_stale_session_error(exc):
+                raise
+            print(
+                f"品牌数据银行会话疑似过期，重新读取浏览器会话后重试 "
+                f"({attempt + 2}/{attempts}): {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(1.0)
+    assert last_error is not None
+    raise last_error
 
 
 def _write_payload(output: Path, payload: dict[str, object]) -> None:
@@ -185,6 +341,7 @@ def main() -> int:
         csrf_token=runtime.csrf_token,
         timeout=args.timeout,
         brand_id=args.brand_id,
+        browser_port=args.browser_port if args.session_source == "drissionpage" else None,
     )
     print(json.dumps({"status": status, "endpoint_count": endpoint_count, "output": str(args.output)}, ensure_ascii=False))
     return 0 if 200 <= status < 300 else 1

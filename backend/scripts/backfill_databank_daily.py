@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -14,7 +15,7 @@ from app.core.local_database import LocalDatabase  # noqa: E402
 from app.integrations.tmall_session import add_session_source_arguments, resolve_databank_runtime_context  # noqa: E402
 from app.modules.imports.crawl_run_store import CrawlRunStore  # noqa: E402
 from app.warehouse.databank import ingest_snapshot  # noqa: E402
-from scripts.fetch_databank_daily import fetch_databank_daily  # noqa: E402
+from scripts.fetch_databank_daily import fetch_databank_daily_with_retry  # noqa: E402
 
 
 DEFAULT_OUTPUT_DIR = Path(settings.local_database_path).parent / "raw_responses" / "databank_daily"
@@ -83,14 +84,22 @@ def main() -> int:
     runtime = None
     summary = {"run_id": run_id, "total": len(days), "inserted": 0, "no_data": 0, "skipped": 0, "failed": 0}
     recorded_days: set[date] = set()
+
+    def resolve_runtime() -> tuple[str, str]:
+        """Re-read the live browser session (used for stale-session retries)."""
+
+        nonlocal runtime
+        runtime = resolve_databank_runtime_context(
+            source=args.session_source,
+            cookie_env=args.cookie_env,
+            csrf_token="",
+            browser_port=args.browser_port,
+        )
+        return runtime.session.cookie_header, runtime.csrf_token
+
     try:
         if pending:
-            runtime = resolve_databank_runtime_context(
-                source=args.session_source,
-                cookie_env=args.cookie_env,
-                csrf_token="",
-                browser_port=args.browser_port,
-            )
+            resolve_runtime()
         for day in days:
             if runtime is None or (not args.refresh_existing and day.isoformat() in existing):
                 summary["skipped"] += 1
@@ -100,13 +109,16 @@ def main() -> int:
                 continue
             output = args.output_dir / f"{day.isoformat()}.json"
             try:
-                status, _ = fetch_databank_daily(
+                status, _ = fetch_databank_daily_with_retry(
                     business_day=day,
                     output=output,
-                    cookie=runtime.session.cookie_header,
-                    csrf_token=runtime.csrf_token,
+                    resolve_runtime=resolve_runtime,
                     timeout=args.timeout,
                     brand_id=args.brand_id,
+                    browser_port=(
+                        args.browser_port if args.session_source == "drissionpage"
+                        else int(os.getenv("ECHO_BATCH_DATABANK_BROWSER_PORT", "0")) or None
+                    ),
                 )
                 if not 200 <= status < 300:
                     raise RuntimeError(f"fetch failed: HTTP {status}")

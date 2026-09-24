@@ -29,9 +29,11 @@ from app.modules.imports.crawl_run_store import CrawlRunStore  # noqa: E402
 from app.warehouse.store import WarehouseStore  # noqa: E402
 from scripts.fetch_alimama_rtb_report import (  # noqa: E402
     REPORT_CONFIG,
+    alimama_browser_fallback_port,
     alimama_report_home,
     fetch_alimama_report,
 )
+from scripts.alimama_report_quality import preserve_existing_rows_on_empty_refresh  # noqa: E402
 
 
 DEFAULT_STORE_NAME = "碧芭宝贝旗舰店"
@@ -53,6 +55,8 @@ def main() -> int:
     parser.add_argument("--max-pages", type=int, default=1000)
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--page-sleep", type=float, default=0.4)
+    parser.add_argument("--empty-page-retries", type=int, default=2)
+    parser.add_argument("--retry-sleep", type=float, default=1.0)
     parser.add_argument("--day-sleep-min", type=float, default=1.2)
     parser.add_argument("--day-sleep-max", type=float, default=2.8)
     parser.add_argument("--refresh-existing", action="store_true")
@@ -67,7 +71,13 @@ def main() -> int:
         raise ValueError("--end must be greater than or equal to --start.")
     if not 1 <= args.page_size <= 100 or args.max_pages < 1:
         raise ValueError("page-size must be 1..100 and max-pages must be positive.")
-    if args.page_sleep < 0 or args.day_sleep_min < 0 or args.day_sleep_max < args.day_sleep_min:
+    if (
+        args.page_sleep < 0
+        or args.empty_page_retries < 0
+        or args.retry_sleep < 0
+        or args.day_sleep_min < 0
+        or args.day_sleep_max < args.day_sleep_min
+    ):
         raise ValueError("sleep values must be valid.")
 
     rpt_type = "item_promotion" if args.detail_type == "item" else "other_promotion"
@@ -108,6 +118,13 @@ def main() -> int:
                 continue
             try:
                 response_path, pages, source_rows = _fetch_day(business_day, args, rpt_type, runtime, args.output_dir)
+                preserve_existing_rows_on_empty_refresh(
+                    database,
+                    table=table,
+                    store_id=args.store_id,
+                    business_day=business_day,
+                    source_rows=source_rows,
+                )
                 if args.detail_type == "item":
                     result = warehouse.ingest_alimama_promotion_item_report(source_path=response_path, business_day=business_day, store_name=args.store_name, platform_store_id=args.platform_store_id)
                 else:
@@ -144,13 +161,49 @@ def _fetch_day(business_day: date, args: argparse.Namespace, rpt_type: str, runt
     offset = 0
     for page_number in range(1, args.max_pages + 1):
         page_path = day_dir / f"page_{page_number:04d}_offset_{offset}.json"
-        status, code, message, _ = fetch_alimama_report(start_day=business_day, end_day=business_day, output=page_path, cookie=runtime.session.cookie_header, csrf_id=runtime.csrf_id, login_point_id=runtime.login_point_id, rpt_type=rpt_type, query_fields=config["fields"], query_domains=config["domains"], biz_codes=config["biz_codes"], extra_body=config.get("extra_body"), offset=offset, page_size=args.page_size, timeout=args.timeout)
+        status, code, message, _ = fetch_alimama_report(start_day=business_day, end_day=business_day, output=page_path, cookie=runtime.session.cookie_header, csrf_id=runtime.csrf_id, login_point_id=runtime.login_point_id, rpt_type=rpt_type, query_fields=config["fields"], query_domains=config["domains"], biz_codes=config["biz_codes"], extra_body=config.get("extra_body"), offset=offset, page_size=args.page_size, timeout=args.timeout, browser_port=alimama_browser_fallback_port(args.session_source, args.browser_port))
         if not 200 <= status < 300 or code != 0:
             raise RuntimeError(f"{rpt_type} page fetch failed: HTTP {status}, code {code}, message {message}")
         payload = json.loads(page_path.read_text(encoding="utf-8"))
         data = payload.get("data") if isinstance(payload, dict) else None
         rows = data.get("list") if isinstance(data, dict) else None
         rows = rows if isinstance(rows, list) else []
+        if page_number == 1 and not rows:
+            for retry_number in range(1, args.empty_page_retries + 1):
+                if args.retry_sleep:
+                    time.sleep(args.retry_sleep * retry_number)
+                status, code, message, _ = fetch_alimama_report(
+                    start_day=business_day,
+                    end_day=business_day,
+                    output=page_path,
+                    cookie=runtime.session.cookie_header,
+                    csrf_id=runtime.csrf_id,
+                    login_point_id=runtime.login_point_id,
+                    rpt_type=rpt_type,
+                    query_fields=config["fields"],
+                    query_domains=config["domains"],
+                    biz_codes=config["biz_codes"],
+                    extra_body=config.get("extra_body"),
+                    offset=offset,
+                    page_size=args.page_size,
+                    timeout=args.timeout,
+                    browser_port=alimama_browser_fallback_port(args.session_source, args.browser_port),
+                )
+                if not 200 <= status < 300 or code != 0:
+                    raise RuntimeError(
+                        f"{rpt_type} page retry failed: HTTP {status}, "
+                        f"code {code}, message {message}"
+                    )
+                payload = json.loads(page_path.read_text(encoding="utf-8"))
+                data = payload.get("data") if isinstance(payload, dict) else None
+                rows = data.get("list") if isinstance(data, dict) else None
+                rows = rows if isinstance(rows, list) else []
+                if rows:
+                    break
+                print(
+                    f"{business_day.isoformat()} empty {rpt_type} response "
+                    f"retry {retry_number}/{args.empty_page_retries}"
+                )
         pages.append(payload)
         rows_total += len(rows)
         count = data.get("count") if isinstance(data, dict) else None

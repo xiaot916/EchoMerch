@@ -6,6 +6,8 @@ import { init, use } from "echarts/core"
 import { CanvasRenderer } from "echarts/renderers"
 import type { ECharts } from "echarts/core"
 
+import { baseCategoryAxis, baseValueAxis, withChartTheme } from "@/lib/echartsTheme"
+
 type Point = Record<string, string | number | null>
 
 const props = defineProps<{
@@ -29,15 +31,15 @@ function renderChart() {
   if (!container.value) return
   chart ??= init(container.value)
   const dates = props.items.map((item) => String(item.stat_date).slice(5))
-  chart.setOption({
+  chart.setOption(withChartTheme({
     animationDuration: 320,
     grid: { left: 46, right: 26, top: 42, bottom: 28, containLabel: true },
-    legend: { top: 5, left: 46, itemWidth: 14, itemHeight: 7, textStyle: { color: "#6f8077", fontSize: 10 } },
+    legend: { top: 5, left: 46, itemWidth: 14, itemHeight: 7, textStyle: { color: "#6f8077", fontSize: 12 } },
     tooltip: {
       trigger: "axis",
       backgroundColor: "#fff",
       borderColor: "#dce8e1",
-      textStyle: { color: "#33443b", fontSize: 11 },
+      textStyle: { color: "#33443b", fontSize: 12 },
       formatter: (params: Array<{ seriesName: string; value: number | null; marker: string; axisValue: string; seriesIndex: number }>) => {
         if (!params.length) return ""
         return `<strong>${params[0].axisValue}</strong><br/>${params.map((item) => {
@@ -46,13 +48,13 @@ function renderChart() {
         }).join("<br/>")}`
       },
     },
-    xAxis: { type: "category", boundaryGap: false, data: dates, axisLine: { lineStyle: { color: "#dfe8e3" } }, axisTick: { show: false }, axisLabel: { color: "#8b9891", fontSize: 9, interval: "auto", hideOverlap: true } },
-    yAxis: { type: "value", splitLine: { lineStyle: { color: "#edf2ef", type: "dashed" } }, axisLine: { show: false }, axisTick: { show: false }, axisLabel: { color: "#8b9891", fontSize: 9 } },
+    xAxis: baseCategoryAxis({ boundaryGap: false, data: dates, axisLabel: { color: "#8b9891", fontSize: 12, interval: "auto", hideOverlap: true } }),
+    yAxis: baseValueAxis({ splitLine: { lineStyle: { color: "#edf2ef", type: "dashed" } }, axisLabel: { color: "#8b9891", fontSize: 12 } }),
     series: props.series.map((definition) => ({ name: definition.name, type: "line", smooth: false, connectNulls: false, symbol: "none", lineStyle: { width: 2, color: definition.color }, itemStyle: { color: definition.color }, areaStyle: props.series.length === 1 ? { color: `${definition.color}18` } : undefined, data: props.items.map((item) => {
       const value = item[definition.key]
       return value === null || value === undefined || value === "" ? null : Number(value)
     }) })),
-  }, true)
+  }), true)
 }
 
 onMounted(() => {

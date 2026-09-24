@@ -22,8 +22,14 @@ from app.modules.imports.crawl_run_store import CrawlRunStore  # noqa: E402
 from app.warehouse.store import WarehouseStore  # noqa: E402
 from scripts.fetch_alimama_rtb_report import (  # noqa: E402
     REPORT_CONFIG,
+    alimama_browser_fallback_port,
     alimama_report_home,
     fetch_alimama_report,
+)
+from scripts.alimama_report_quality import (  # noqa: E402
+    AlimamaReportIncomplete,
+    preserve_existing_rows_on_empty_refresh,
+    validate_campaign_buyer_metrics,
 )
 
 
@@ -51,6 +57,8 @@ def main() -> int:
     parser.add_argument("--page-sleep", type=float, default=0.4)
     parser.add_argument("--empty-page-retries", type=int, default=2)
     parser.add_argument("--retry-sleep", type=float, default=1.0)
+    parser.add_argument("--incomplete-retries", type=int, default=2)
+    parser.add_argument("--incomplete-retry-sleep", type=float, default=30.0)
     parser.add_argument("--day-sleep-min", type=float, default=1.2)
     parser.add_argument("--day-sleep-max", type=float, default=2.8)
     parser.add_argument("--refresh-existing", action="store_true")
@@ -70,6 +78,8 @@ def main() -> int:
         args.page_sleep < 0
         or args.empty_page_retries < 0
         or args.retry_sleep < 0
+        or args.incomplete_retries < 0
+        or args.incomplete_retry_sleep < 0
         or args.day_sleep_min < 0
         or args.day_sleep_max < args.day_sleep_min
     ):
@@ -134,12 +144,15 @@ def main() -> int:
                 print(f"[{index}/{len(days)}] {business_day.isoformat()} skipped existing")
                 continue
             try:
-                response_path, pages, source_rows = _fetch_day(
-                    business_day,
-                    args,
-                    runtime.session.cookie_header if runtime else "",
-                    runtime.csrf_id if runtime else "",
-                    runtime.login_point_id if runtime else "",
+                response_path, pages, source_rows = _fetch_complete_day(
+                    business_day, args, runtime
+                )
+                preserve_existing_rows_on_empty_refresh(
+                    database,
+                    table=PROMOTION_CAMPAIGN_TABLE,
+                    store_id=args.store_id,
+                    business_day=business_day,
+                    source_rows=source_rows,
                 )
                 result = warehouse.ingest_alimama_campaign_report(
                     source_path=response_path,
@@ -206,6 +219,40 @@ def main() -> int:
         )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0 if summary["failed"] == 0 else 1
+
+
+def _fetch_complete_day(
+    business_day: date,
+    args: argparse.Namespace,
+    runtime: object,
+) -> tuple[Path, int, int]:
+    for attempt in range(args.incomplete_retries + 1):
+        response_path, page_count, source_rows = _fetch_day(
+            business_day,
+            args,
+            runtime.session.cookie_header if runtime else "",
+            runtime.csrf_id if runtime else "",
+            runtime.login_point_id if runtime else "",
+        )
+        payload = json.loads(response_path.read_text(encoding="utf-8"))
+        pages = payload.get("pages") if isinstance(payload, dict) else None
+        try:
+            validate_campaign_buyer_metrics(
+                pages if isinstance(pages, list) else [],
+                business_day,
+            )
+            return response_path, page_count, source_rows
+        except AlimamaReportIncomplete:
+            if attempt >= args.incomplete_retries:
+                raise
+            wait_seconds = args.incomplete_retry_sleep * (attempt + 1)
+            print(
+                f"{business_day.isoformat()} buyer metrics are still settling; "
+                f"retry {attempt + 1}/{args.incomplete_retries} in {wait_seconds:g}s"
+            )
+            if wait_seconds:
+                time.sleep(wait_seconds)
+    raise RuntimeError("unreachable campaign completeness retry state")
 
 
 def _fetch_day(
@@ -316,6 +363,7 @@ def _fetch_page(
         offset=offset,
         page_size=args.page_size,
         timeout=args.timeout,
+        browser_port=alimama_browser_fallback_port(args.session_source, args.browser_port),
     )
     if not 200 <= status < 300 or code != 0:
         raise RuntimeError(

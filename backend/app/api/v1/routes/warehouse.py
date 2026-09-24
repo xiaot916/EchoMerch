@@ -9,7 +9,6 @@ from app.warehouse.schemas import (
     MetricDefinition,
     PlatformRecord,
     StoreActivityCalendarEvent,
-    StoreDailyFlowOverview,
     StoreDailyOverview,
     StoreRecord,
 )
@@ -53,24 +52,6 @@ def get_daily_overview(
             status_code=404,
             detail=f"No daily overview found for store {store_id}.",
         )
-    return overview
-
-
-@router.get("/stores/{store_id}/daily-flow-overview", response_model=StoreDailyFlowOverview)
-def get_daily_flow_overview(
-    store_id: int,
-    day: date | None = Query(default=None),
-    principal: Principal = Depends(require_permission("warehouse.read")),
-) -> StoreDailyFlowOverview:
-    overview = get_warehouse_store().get_daily_flow_overview(
-        store_id=resolve_store_scope(principal, store_id) or store_id,
-        business_day=day,
-    )
-    if overview is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No daily flow overview found for store {store_id}.",
-    )
     return overview
 
 

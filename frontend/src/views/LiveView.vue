@@ -172,7 +172,7 @@ const trendOption = computed(() => ({
 const funnelOption = computed(() => ({
   color: ["#a8d9c4", "#6bbd99", "#e2a447", "#5b8def"],
   tooltip: { trigger: "item", formatter: (params: { name: string; value: number }) => `${params.name}<br/>${number(params.value)} 人` },
-  series: [{ type: "funnel", left: "5%", top: 18, bottom: 18, width: "90%", min: 0, max: Math.max(live.value?.viewers ?? 0, 1), minSize: "18%", maxSize: "100%", sort: "descending", gap: 4, label: { show: true, position: "inside", color: "#264235", fontSize: 11, lineHeight: 19, formatter: (params: { name: string; value: number }) => `${params.name}\n${number(params.value)} 人` }, data: live.value ? [
+  series: [{ type: "funnel", left: "5%", top: 18, bottom: 18, width: "90%", min: 0, max: Math.max(live.value?.viewers ?? 0, 1), minSize: "18%", maxSize: "100%", sort: "descending", gap: 4, label: { show: true, position: "inside", color: "#264235", fontSize: 12, lineHeight: 19, formatter: (params: { name: string; value: number }) => `${params.name}\n${number(params.value)} 人` }, data: live.value ? [
     { name: "店播观看", value: live.value.viewers },
     { name: "商品点击", value: live.value.item_click_users },
     { name: "店播成交", value: live.value.buyers },
@@ -267,12 +267,12 @@ const funnelOption = computed(() => ({
 .live-funnel-rates { display: grid; gap: 0; border-left: 1px solid #e4ebe7; padding-left: 16px; }
 .live-funnel-rates > div { display: grid; gap: 5px; border-bottom: 1px solid #edf2ef; padding: 16px 0; }
 .live-funnel-rates > div:last-child { border-bottom: 0; }
-.live-funnel-rates span { color: #74867c; font-size: 10px; }
+.live-funnel-rates span { color: #74867c; font-size: 12px; }
 .live-funnel-rates strong { color: #16845b; font-size: 22px; font-weight: 740; line-height: 1.15; }
-.live-funnel-rates small { color: #94a098; font-size: 9px; line-height: 1.5; }
+.live-funnel-rates small { color: #94a098; font-size: 12px; line-height: 1.5; }
 .live-funnel-rates .overall strong { color: #d3922c; }
 .live-daily-table-wrap { overflow-x: auto; margin-top: 12px; padding: 0 16px; }
-.live-daily-table { width: 100%; min-width: 1050px; border-collapse: collapse; table-layout: fixed; }.live-daily-table th,.live-daily-table td { border-bottom: 1px solid #edf2ef; padding: 10px 8px; color: #66776e; font-size: 10px; text-align: right; }.live-daily-table th { color: #8c9991; background: #f8faf9; font-size: 9px; font-weight: 650; }.live-daily-table th:first-child,.live-daily-table td:first-child { width: 105px; text-align: left; }.live-daily-table td strong { color: #40564a; }.live-daily-table td em { color: #16845b; font-style: normal; font-weight: 700; }
+.live-daily-table { width: 100%; min-width: 1050px; border-collapse: collapse; table-layout: fixed; }.live-daily-table th,.live-daily-table td { border-bottom: 1px solid #edf2ef; padding: 10px 8px; color: #66776e; font-size: 12px; text-align: right; }.live-daily-table th { color: #8c9991; background: #f8faf9; font-size: 12px; font-weight: 650; }.live-daily-table th:first-child,.live-daily-table td:first-child { width: 105px; text-align: left; }.live-daily-table td strong { color: #40564a; }.live-daily-table td em { color: #16845b; font-style: normal; font-weight: 700; }
 @media (max-width: 760px) {
   .live-funnel-layout { grid-template-columns: 1fr; }
   .live-funnel-rates { grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid #e4ebe7; border-left: 0; padding-top: 8px; padding-left: 0; }

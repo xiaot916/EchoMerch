@@ -56,6 +56,7 @@ MENU_DEFINITIONS: tuple[MenuDefinition, ...] = tuple(
         ]),
         _domain("home", "首页", "/", 2, "analytics.read", [
             ("route:overview", "经营概览", "/", "analytics.read"),
+            ("route:big-screen", "经营大屏", "/big-screen", "analytics.read"),
         ]),
         _domain("transaction", "交易", "/analytics", 3, "analytics.read", [
             ("route:analytics", "交易分析", "/analytics", "analytics.read"),

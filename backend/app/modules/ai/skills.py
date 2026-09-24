@@ -743,9 +743,10 @@ def _period_report_diagnosis(results: list[MCPEnvelope]) -> Diagnosis:
     refund_rate = float(operations.get("refund_rate")) if operations.get("refund_rate") is not None else ((gmv - net_gmv) / gmv * 100 if gmv else 0)
     comparison = report.get("comparison", {})
     report_type = str(report.get("report_type") or "daily")
+    comparison_label = str(report.get("comparison_label") or "环比")
     range_start = str(report.get("range_start") or "")
     range_end = str(report.get("range_end") or "")
-    period_label = "昨日" if report_type == "daily" else "本周" if report_type == "weekly" else "本月" if report_type in {"monthly", "daily_series"} else "本月至今"
+    period_label = "复盘期" if report_type == "business_review" else "昨日" if report_type == "daily" else "本周" if report_type == "weekly" else "本月" if report_type in {"monthly", "daily_series"} else "本月至今"
 
     def change(metric: str) -> float | None:
         value = comparison.get(metric, {}).get("change_percent") if isinstance(comparison.get(metric), dict) else None
@@ -761,18 +762,18 @@ def _period_report_diagnosis(results: list[MCPEnvelope]) -> Diagnosis:
     dominant_label = dominant_driver.get("label")
     dominant_impact = float(dominant_driver.get("impact_amount") or 0)
     if gmv_change is None:
-        headline = f"{period_label} GMV {gmv / 10000:.2f} 万，去退后 {net_gmv / 10000:.2f} 万"
+        headline = f"{period_label}支付金额 {gmv / 10000:.2f} 万，退款后 {net_gmv / 10000:.2f} 万"
         summary = f"统计区间 {range_start} 至 {range_end}，当前没有可用的上一周期对比，先看本期结构和数据覆盖。"
     elif gmv_change <= -5:
         driver = dominant_label or ("流量收缩" if visitors_change is not None and visitors_change <= -5 else "转化承接变弱" if conversion_change is not None and conversion_change <= -5 else "需要结合渠道与商品继续定位")
-        headline = f"{period_label} GMV 环比下降 {abs(gmv_change):.1f}%，优先排查{driver}"
-        summary = f"统计区间 {range_start} 至 {range_end}；GMV {gmv / 10000:.2f} 万，去退 GMV {net_gmv / 10000:.2f} 万。顺序桥接显示{driver}影响约 {abs(dominant_impact) / 10000:.2f} 万，是本次变化的最大解释项；这不是因果增量结论。"
+        headline = f"{period_label}支付金额{comparison_label}下降 {abs(gmv_change):.1f}%，优先排查{driver}"
+        summary = f"统计区间 {range_start} 至 {range_end}；支付金额 {gmv / 10000:.2f} 万，退款后金额 {net_gmv / 10000:.2f} 万。顺序桥接显示{driver}影响约 {abs(dominant_impact) / 10000:.2f} 万，是本次变化的最大解释项；这不是因果增量结论。"
     elif gmv_change >= 5:
-        headline = f"{period_label} GMV 环比增长 {gmv_change:.1f}%，需要确认增长是否可复制"
-        summary = f"统计区间 {range_start} 至 {range_end}；GMV {gmv / 10000:.2f} 万，去退 GMV {net_gmv / 10000:.2f} 万；重点复核流量、商品和推广结构是否同步改善。"
+        headline = f"{period_label}支付金额{comparison_label}增长 {gmv_change:.1f}%，需要确认增长是否可复制"
+        summary = f"统计区间 {range_start} 至 {range_end}；支付金额 {gmv / 10000:.2f} 万，退款后金额 {net_gmv / 10000:.2f} 万；重点复核流量、商品和推广结构是否同步改善。"
     else:
-        headline = f"{period_label}经营基本平稳，GMV {gmv / 10000:.2f} 万"
-        summary = f"统计区间 {range_start} 至 {range_end}；去退 GMV {net_gmv / 10000:.2f} 万，退款金额占 GMV {refund_rate:.2f}%；未触发显著波动预警。"
+        headline = f"{period_label}经营基本平稳，支付金额 {gmv / 10000:.2f} 万"
+        summary = f"统计区间 {range_start} 至 {range_end}；退款后金额 {net_gmv / 10000:.2f} 万，退款金额占支付金额 {refund_rate:.2f}%；未触发显著波动预警。"
 
     findings = [DiagnosisFinding(level="info", title="经营结果", detail=summary, metric_ids=["gmv", "net_gmv", "refund_rate"])]
     actions: list[RecommendedAction] = []
@@ -786,13 +787,13 @@ def _period_report_diagnosis(results: list[MCPEnvelope]) -> Diagnosis:
         level = "warning" if pace_gap is not None and float(pace_gap) < -3 else "positive" if pace_gap is not None and float(pace_gap) >= 0 else "info"
         findings.insert(1, DiagnosisFinding(level=level, title="销售目标进度", detail=progress_detail, metric_ids=["gmv"]))
         if pace_gap is not None and float(pace_gap) < -3:
-            actions.append(RecommendedAction(priority="P0", title="补齐目标进度缺口", detail="先按剩余天数反推日均 GMV 缺口，再拆到渠道与主销商品；不要直接按历史花费同比例加预算。", owner="经营负责人", validation="未来 3 天日均 GMV 达到追赶目标且退款率不恶化"))
+            actions.append(RecommendedAction(priority="P0", title="补齐目标进度缺口", detail="先按剩余天数反推日均支付金额缺口，再拆到渠道与主销商品；不要直接按历史花费同比例加预算。", owner="经营负责人", validation="未来 3 天日均支付金额达到追赶目标且退款率不恶化"))
     if gmv_change is not None and gmv_change <= -5:
         if driver_bridge.get("drivers"):
             for item in sorted(driver_bridge["drivers"], key=lambda row: abs(float(row.get("impact_amount") or 0)), reverse=True)[:3]:
                 impact = float(item.get("impact_amount") or 0)
                 change_percent = item.get("change_percent")
-                detail = f"{item.get('label')}环比 {float(change_percent):+.1f}%" if change_percent is not None else f"{item.get('label')}缺少环比"
+                detail = f"{item.get('label')}{comparison_label} {float(change_percent):+.1f}%" if change_percent is not None else f"{item.get('label')}缺少{comparison_label}"
                 detail += f"，顺序桥接影响 {impact / 10000:+.2f} 万。"
                 findings.append(DiagnosisFinding(
                     level="warning" if impact < 0 else "positive",
@@ -809,25 +810,25 @@ def _period_report_diagnosis(results: list[MCPEnvelope]) -> Diagnosis:
                 validation="客单价恢复、正装/主销系列占比回升，且支付转化率与退款率不恶化",
             ))
         if visitors_change is not None and visitors_change <= -5:
-            findings.append(DiagnosisFinding(level="warning", title="流量规模是首要排查方向", detail=f"访客环比 {visitors_change:.1f}%，需要下钻自然、推广和直播来源的下降贡献。", metric_ids=["visitors", "gmv"]))
+            findings.append(DiagnosisFinding(level="warning", title="流量规模是首要排查方向", detail=f"访客{comparison_label} {visitors_change:.1f}%，需要下钻自然、推广和直播来源的下降贡献。", metric_ids=["visitors", "gmv"]))
             actions.append(RecommendedAction(priority="P0", title="定位流量缺口", detail="先找出下降贡献最大的流量来源，再决定是否恢复预算；不要直接全量加投。", owner="流量运营", validation="下降来源恢复且支付转化率不恶化"))
         elif conversion_change is not None and conversion_change <= -5:
-            findings.append(DiagnosisFinding(level="warning", title="流量仍在但成交承接变弱", detail=f"支付转化率环比 {conversion_change:.1f}%，优先检查主销商品价格、库存、详情和优惠。", metric_ids=["conversion_rate", "gmv"]))
+            findings.append(DiagnosisFinding(level="warning", title="流量仍在但成交承接变弱", detail=f"支付转化率{comparison_label} {conversion_change:.1f}%，优先检查主销商品价格、库存、详情和优惠。", metric_ids=["conversion_rate", "gmv"]))
             actions.append(RecommendedAction(priority="P0", title="修复成交承接", detail="先检查高流量商品的详情首屏、价格力、库存和评价，不先扩大推广。", owner="商品运营", validation="支付转化率和加购率恢复"))
         elif buyers_change is not None and buyers_change <= -5:
-            findings.append(DiagnosisFinding(level="warning", title="支付买家减少", detail=f"支付买家环比 {buyers_change:.1f}%，需要结合新老客和渠道结构判断。", metric_ids=["buyers", "gmv"]))
+            findings.append(DiagnosisFinding(level="warning", title="支付买家减少", detail=f"支付买家{comparison_label} {buyers_change:.1f}%，需要结合新老客和渠道结构判断。", metric_ids=["buyers", "gmv"]))
     elif gmv_change is not None and gmv_change >= 5:
-        findings.append(DiagnosisFinding(level="positive", title="成交增长需要验证可持续性", detail=f"GMV 环比增长 {gmv_change:.1f}%，不能直接等同于活动或渠道产生了因果增量。", metric_ids=["gmv"]))
+        findings.append(DiagnosisFinding(level="positive", title="成交增长需要验证可持续性", detail=f"支付金额{comparison_label}增长 {gmv_change:.1f}%，不能直接等同于活动或渠道产生了因果增量。", metric_ids=["gmv"]))
 
     if refund_rate >= 20:
-        findings.append(DiagnosisFinding(level="warning", title="退款压力偏高", detail=f"退款金额占 GMV {refund_rate:.2f}%，建议按商品、原因和渠道拆解退款结构。", metric_ids=["net_gmv"]))
-        actions.append(RecommendedAction(priority="P0", title="复盘退款结构", detail="先定位退款金额最高的商品和退款原因，避免只看 GMV 增长。", validation="退款率连续两个周期下降"))
+        findings.append(DiagnosisFinding(level="warning", title="退款压力偏高", detail=f"退款金额占支付金额 {refund_rate:.2f}%，建议按商品、原因和渠道拆解退款结构。", metric_ids=["net_gmv"]))
+        actions.append(RecommendedAction(priority="P0", title="复盘退款结构", detail="先定位退款金额最高的商品和退款原因，避免只看支付金额增长。", validation="退款率连续两个周期下降"))
     elif refund_rate >= 10:
-        findings.append(DiagnosisFinding(level="warning", title="退款占比需要关注", detail=f"退款金额占 GMV {refund_rate:.2f}%，建议按商品和渠道追踪，不将去退 GMV 与支付 GMV 混用。", metric_ids=["refund_rate", "net_gmv"]))
+        findings.append(DiagnosisFinding(level="warning", title="退款占比需要关注", detail=f"退款金额占支付金额 {refund_rate:.2f}%，建议按商品和渠道追踪，不将退款后金额与支付金额混用。", metric_ids=["refund_rate", "net_gmv"]))
         actions.append(RecommendedAction(priority="P1", title="追踪高退款商品", detail="按商品、活动和渠道拆解退款金额，确认是商品预期、优惠承诺还是履约问题。", owner="商品运营", validation="退款金额占比连续下降"))
     member = channels.get("member", {})
     if member.get("status") == "available":
-        findings.append(DiagnosisFinding(level="positive", title="会员是重要成交渠道", detail=f"会员成交 {float(member.get('paid_amount') or 0) / 10000:.2f} 万，占 GMV {float(member.get('sales_share') or 0):.2f}%。"))
+        findings.append(DiagnosisFinding(level="positive", title="会员是重要成交标签", detail=f"会员成交 {float(member.get('paid_amount') or 0) / 10000:.2f} 万，占店铺支付金额 {float(member.get('sales_share') or 0):.2f}%；会员身份可能与其他渠道重叠。"))
     if promotions.get("roi") is not None:
         roi = float(promotions["roi"])
         level = "positive" if roi >= 3 else "warning" if roi < 2 else "info"
@@ -841,7 +842,7 @@ def _period_report_diagnosis(results: list[MCPEnvelope]) -> Diagnosis:
         actions.append(RecommendedAction(priority="P0", title="补齐报告缺失模块", detail="以下模块暂不能作为完整经营结论：" + "、".join(missing), owner="数据运营", validation="模块状态变为 complete 或 no_data"))
     talents = report.get("top_talents", [])
     if talents:
-        actions.append(RecommendedAction(priority="P1", title="补齐头部达人效率口径", detail=f"头部达人 {talents[0].get('name')} GMV {float(talents[0].get('gmv') or 0) / 10000:.2f} 万；先补齐佣金、退款扣除和新客数据，再判断是否复投，不直接按 GMV 扩合作。", validation="同时得到退款后成交、已知佣金、单买家产出和新客占比"))
+        actions.append(RecommendedAction(priority="P1", title="补齐头部达人效率口径", detail=f"头部达人 {talents[0].get('name')} 归因成交 {float(talents[0].get('gmv') or 0) / 10000:.2f} 万；先补齐佣金、退款扣除和新客数据，再判断是否复投，不直接按归因成交扩合作。", validation="同时得到退款后成交、已知佣金、单买家产出和新客占比"))
     channel_rows = []
     for key, channel in channels.items():
         if not isinstance(channel, dict) or channel.get("status") not in {"available", "complete"}:
@@ -872,19 +873,19 @@ def _period_report_diagnosis(results: list[MCPEnvelope]) -> Diagnosis:
         })
     talent_rows = [{"达人": item.get("name"), "成交金额": item.get("gmv"), "合作场次": item.get("sessions"), "支付买家": item.get("buyers")} for item in talents]
     artifacts = [ArtifactSpec(type="metric_table", title="周期经营指标", rows=[
-        {"指标": "GMV", "当前值": gmv, "单位": "CNY", "环比%": gmv_change},
-        {"指标": "去退 GMV", "当前值": net_gmv, "单位": "CNY"},
-        {"指标": "访客", "当前值": operations.get("visitors"), "单位": "人", "环比%": visitors_change},
-        {"指标": "支付买家", "当前值": operations.get("buyers"), "单位": "人", "环比%": buyers_change},
-        {"指标": "支付转化率", "当前值": operations.get("conversion_rate"), "单位": "%", "环比%": conversion_change},
-        {"指标": "客单价", "当前值": operations.get("customer_unit_price"), "单位": "CNY", "环比%": customer_unit_price_change},
+        {"指标": "支付金额", "当前值": gmv, "单位": "CNY", f"{comparison_label}%": gmv_change},
+        {"指标": "退款后金额", "当前值": net_gmv, "单位": "CNY"},
+        {"指标": "访客", "当前值": operations.get("visitors"), "单位": "人", f"{comparison_label}%": visitors_change},
+        {"指标": "支付买家", "当前值": operations.get("buyers"), "单位": "人", f"{comparison_label}%": buyers_change},
+        {"指标": "支付转化率", "当前值": operations.get("conversion_rate"), "单位": "%", f"{comparison_label}%": conversion_change},
+        {"指标": "客单价", "当前值": operations.get("customer_unit_price"), "单位": "CNY", f"{comparison_label}%": customer_unit_price_change},
         {"指标": "退款金额占比", "当前值": round(refund_rate, 2), "单位": "%"},
         {"指标": "推广 ROI", "当前值": promotions.get("roi"), "单位": "ratio"},
     ])]
     if channel_rows:
         artifacts.append(ArtifactSpec(type="matrix", title="渠道成交结构", rows=channel_rows))
     if driver_bridge.get("drivers"):
-        artifacts.append(ArtifactSpec(type="matrix", title="GMV 变化驱动桥接", rows=[
+        artifacts.append(ArtifactSpec(type="matrix", title="支付金额变化驱动桥接", rows=[
             {"驱动": item.get("label"), "影响金额": item.get("impact_amount"), "环比%": item.get("change_percent")}
             for item in driver_bridge["drivers"]
         ]))
@@ -899,7 +900,7 @@ def _period_report_diagnosis(results: list[MCPEnvelope]) -> Diagnosis:
         actions=actions[:6],
         artifacts=artifacts,
         next_questions=list(dict.fromkeys([
-            "下钻客单价下降的系列、类型和商品" if dominant_label == "客单价" else "下钻 GMV 变化最大的驱动项",
+            "下钻客单价下降的系列、类型和商品" if dominant_label == "客单价" else "下钻支付金额变化最大的驱动项",
             "拆解会员、直播和 CPS 的重叠口径" if report.get("channel_scope") else "查看渠道归因明细",
         ])),
     )

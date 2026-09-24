@@ -60,6 +60,34 @@ def test_alimama_report_builds_post_body_and_query(monkeypatch, tmp_path: Path) 
     assert captured["timeout"] == 17
 
 
+def test_non_json_report_retries_in_existing_alimama_tab(monkeypatch, tmp_path: Path) -> None:
+    class HtmlResponse(_Response):
+        def read(self) -> bytes:
+            return b"<html>login</html>"
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(fetch_alimama_rtb_report, "urlopen", lambda *_args, **_kwargs: HtmlResponse())
+
+    def browser_fetch(port: int, url: str, data: bytes, *, timeout: int) -> tuple[int, bytes]:
+        seen.update(port=port, url=url, data=json.loads(data), timeout=timeout)
+        return 200, b'{"info":{"ok":true},"data":{"list":[{"id":1}]}}'
+
+    monkeypatch.setattr(fetch_alimama_rtb_report, "_fetch_in_existing_alimama_tab", browser_fetch)
+    output = tmp_path / "report.json"
+    status, code, _message, size = fetch_alimama_rtb_report.fetch_alimama_report(
+        start_day=date(2026, 9, 22), end_day=date(2026, 9, 22), output=output,
+        cookie="t=session", csrf_id="csrf", login_point_id="point",
+        rpt_type="campaign", timeout=11, browser_port=9222,
+    )
+
+    assert (status, code, size) == (200, 0, output.stat().st_size)
+    assert seen["port"] == 9222
+    assert seen["timeout"] == 11
+    assert urlparse(str(seen["url"])).hostname == "one.alimama.com"
+    assert seen["data"]["rptType"] == "campaign"
+    assert json.loads(output.read_text(encoding="utf-8"))["data"]["list"] == [{"id": 1}]
+
+
 def test_bidword_report_home_matches_the_keyword_report_route() -> None:
     report_home = fetch_alimama_rtb_report.alimama_report_home("bidword")
 

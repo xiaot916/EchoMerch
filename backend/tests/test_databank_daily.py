@@ -125,6 +125,67 @@ def test_databank_persists_platform_error_responses_before_failing(
     assert saved["homepage_panel"]["errMsg"] == "param illegal"
 
 
+def test_databank_html_response_retries_in_existing_tab(monkeypatch, tmp_path: Path) -> None:
+    class HtmlResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b"<html>error</html>"
+
+    paths: list[str] = []
+    monkeypatch.setattr(fetch_databank_daily, "urlopen", lambda *_args, **_kwargs: HtmlResponse())
+
+    def browser_fetch(port: int, path: str, *, timeout: int) -> tuple[int, bytes]:
+        assert port == 9222
+        assert timeout == 15
+        paths.append(path)
+        return 200, b'{"data":{"customerVolume":{"value":100}},"errCode":0}'
+
+    monkeypatch.setattr(fetch_databank_daily, "_fetch_in_existing_databank_tab", browser_fetch)
+    output = tmp_path / "databank.json"
+    status, count = fetch_databank_daily.fetch_databank_daily(
+        business_day=date(2026, 9, 22), output=output,
+        cookie="t=session", csrf_token="csrf", timeout=15, browser_port=9222,
+    )
+
+    assert status == 200
+    assert count == len(paths) == 17
+    assert set(json.loads(output.read_text(encoding="utf-8"))) >= {"core", "homepage_panel"}
+
+
+def test_databank_browser_failure_does_not_mark_html_as_success(monkeypatch, tmp_path: Path) -> None:
+    class HtmlResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b"<html>error</html>"
+
+    monkeypatch.setattr(fetch_databank_daily, "urlopen", lambda *_args, **_kwargs: HtmlResponse())
+    monkeypatch.setattr(
+        fetch_databank_daily, "_fetch_in_existing_databank_tab",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("session unavailable")),
+    )
+    output = tmp_path / "databank.json"
+    with pytest.raises(RuntimeError, match="浏览器内回退失败"):
+        fetch_databank_daily.fetch_databank_daily(
+            business_day=date(2026, 9, 22), output=output,
+            cookie="t=session", csrf_token="csrf", browser_port=9222,
+        )
+    assert "_echoMerchRawBody" in json.loads(output.read_text(encoding="utf-8"))["core"]
+
+
 def test_databank_ingest_is_idempotent(tmp_path: Path) -> None:
     database_path = tmp_path / "databank.sqlite3"
     LocalDatabase(database_path).initialize_schema()

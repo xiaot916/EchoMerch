@@ -22,6 +22,7 @@ from app.modules.analytics.schemas import (
     ContentDailyMetric,
     CpsAnalysis,
     CpsDailyMetric,
+    CpsProductMetric,
     CustomerAnalysis,
     CustomerDailyMetric,
     CustomerSegmentMetric,
@@ -47,6 +48,7 @@ from app.modules.analytics.schemas import (
     ProductAnalysisDailyMetric,
     ProductAnalysisResponse,
     PromotionAnalysis,
+    PromotionDataQuality,
     PromotionDailyMetric,
     PromotionDimensionMetric,
     PromotionLayerCoverage,
@@ -176,17 +178,41 @@ class LocalWarehouseAnalyticsRepository:
                 sum(cast(coalesce(rankings."商品浏览量", '0') as real)) as page_views,
                 sum(cast(coalesce(rankings."搜索引导访客数", '0') as real)) as search_visitors,
                 sum(cast(coalesce(rankings."推广消耗", '0') as real)) as promotion_spend,
+                max(coalesce(promotion.paid_amount, 0)) as promotion_attributed_paid_amount,
+                max(coalesce(cps.paid_amount, 0)) as cps_paid_amount,
+                max(coalesce(cps.estimated_expense, 0)) as cps_estimated_expense,
+                max(coalesce(cps.entry_visitors, 0)) as cps_entry_visitors,
                 max(coalesce(nullif(catalog."类型", ''), '未分类')) as product_type,
                 max(coalesce(nullif(catalog."系列", ''), '未分类')) as series,
                 max(coalesce(nullif(catalog."定位", ''), '未分类')) as positioning
             from store_daily_product_rankings rankings
             left join store_product_catalog catalog
               on catalog."店铺ID" = rankings."店铺ID" and catalog."商品ID" = rankings."商品ID"
+            left join (
+                select "店铺ID" as store_id, "商品ID" as product_id,
+                    sum(cast(coalesce("总成交金额", '0') as real)) as paid_amount
+                from store_daily_promotion_items
+                where "业务日期" between ? and ?
+                group by "店铺ID", "商品ID"
+            ) promotion on promotion.store_id = rankings."店铺ID" and promotion.product_id = rankings."商品ID"
+            left join (
+                select "店铺ID" as store_id, "商品ID" as product_id,
+                    sum(cast(coalesce("付款金额", '0') as real)) as paid_amount,
+                    sum(cast(coalesce("预估总费用", '0') as real)) as estimated_expense,
+                    sum(cast(coalesce("淘客进店UV", '0') as real)) as entry_visitors
+                from store_daily_cps_items
+                where "业务日期" between ? and ?
+                group by "店铺ID", "商品ID"
+            ) cps on cps.store_id = rankings."店铺ID" and cps.product_id = rankings."商品ID"
             where rankings."店铺ID" = ? and rankings."业务日期" between ? and ?
             group by rankings."商品ID"
             order by paid_amount desc
             {limit_clause}
             """,
+            start_date.isoformat(),
+            end_date.isoformat(),
+            start_date.isoformat(),
+            end_date.isoformat(),
             self._store_id,
             start_date.isoformat(),
             end_date.isoformat(),
@@ -203,6 +229,10 @@ class LocalWarehouseAnalyticsRepository:
                 page_views=_integer(row["page_views"]),
                 search_visitors=_integer(row["search_visitors"]),
                 promotion_spend=_decimal(row["promotion_spend"]),
+                promotion_attributed_paid_amount=_decimal(row["promotion_attributed_paid_amount"]),
+                cps_paid_amount=_decimal(row["cps_paid_amount"]),
+                cps_estimated_expense=_decimal(row["cps_estimated_expense"]),
+                cps_entry_visitors=_integer(row["cps_entry_visitors"]),
                 product_type=str(row["product_type"] or "未分类"),
                 series=str(row["series"] or "未分类"),
                 positioning=str(row["positioning"] or "未分类"),
@@ -786,15 +816,22 @@ class LocalWarehouseAnalyticsRepository:
     ) -> list[PromotionMetric]:
         plan_rows = self._rows(
             """
+            with ranked as (
+                select *, row_number() over (
+                    partition by "推广计划ID"
+                    order by "业务日期" desc, rowid desc
+                ) as identity_rank
+                from store_daily_promotion_campaigns
+                where "店铺ID" = ? and "业务日期" between ? and ?
+            )
             select
-                coalesce(nullif("推广计划名称", ''), '未命名计划') as plan_name,
-                coalesce(nullif("推广场景", ''), '未分类场景') as scene_name,
+                coalesce(nullif(max(case when identity_rank = 1 then "推广计划名称" end), ''), '未命名计划') as plan_name,
+                coalesce(nullif(max(case when identity_rank = 1 then "推广场景" end), ''), '未分类场景') as scene_name,
                 sum(cast(coalesce("花费", '0') as real)) as spend,
                 sum(cast(coalesce("总成交金额", '0') as real)) as paid_amount,
                 sum(cast(coalesce("成交人数", '0') as real)) as buyers
-            from store_daily_promotion_campaigns
-            where "店铺ID" = ? and "业务日期" between ? and ?
-            group by "推广计划ID", "推广计划名称", "推广场景"
+            from ranked
+            group by "推广计划ID"
             having sum(cast(coalesce("花费", '0') as real)) > 0
             order by spend desc
             """,
@@ -901,20 +938,23 @@ class LocalWarehouseAnalyticsRepository:
             start_date.isoformat(),
             end_date.isoformat(),
         )
-        return [
-            PromotionDailyMetric(
+        metrics: list[PromotionDailyMetric] = []
+        for row in rows:
+            orders = _integer(row["orders"])
+            raw_buyers = _integer(row["buyers"])
+            buyer_metrics_available = not (orders > 0 and raw_buyers == 0)
+            metrics.append(PromotionDailyMetric(
                 stat_date=date.fromisoformat(str(row["stat_date"])),
                 impressions=_integer(row["impressions"]),
                 clicks=_integer(row["clicks"]),
                 spend=_decimal(row["spend"]),
                 paid_amount=_decimal(row["paid_amount"]),
-                orders=_integer(row["orders"]),
-                buyers=_integer(row["buyers"]),
+                orders=orders,
+                buyers=raw_buyers if buyer_metrics_available else None,
                 carts=_integer(row["carts"]),
-                new_buyers=_integer(row["new_buyers"]),
-            )
-            for row in rows
-        ]
+                new_buyers=_integer(row["new_buyers"]) if buyer_metrics_available else None,
+            ))
+        return metrics
 
     def get_promotion_workbench(
         self,
@@ -945,47 +985,66 @@ class LocalWarehouseAnalyticsRepository:
                where "店铺ID" = ? and "业务日期" between ? and ?''',
             *where,
         )
-        summary_row = summary_rows[0] if summary_rows else {}
-        summary = self._promotion_summary(summary_row)
         daily = self.get_promotion_daily_metrics(start_date, end_date)
+        partial_dates = [item.stat_date for item in daily if item.buyers is None]
+        covered_dates = {item.stat_date for item in daily}
+        expected_dates = [start_date + timedelta(days=offset) for offset in range((end_date - start_date).days + 1)]
+        missing_dates = [item for item in expected_dates if item not in covered_dates]
+        unavailable_metrics = []
+        if partial_dates:
+            unavailable_metrics = ["buyers", "new_buyers", "click_conversion_rate", "buyer_acquisition_cost", "new_buyer_share"]
+        quality_status = "complete"
+        if not covered_dates:
+            quality_status = "empty"
+        elif missing_dates or partial_dates:
+            quality_status = "partial"
+        data_quality = PromotionDataQuality(
+            status=quality_status,
+            expected_days=len(expected_dates),
+            covered_days=len(covered_dates),
+            valid_buyer_metric_days=sum(item.buyers is not None for item in daily),
+            missing_dates=missing_dates,
+            partial_dates=partial_dates,
+            unavailable_metrics=unavailable_metrics,
+        )
+        summary_row = summary_rows[0] if summary_rows else {}
+        summary = self._promotion_summary(summary_row, daily)
         scenes = self._promotion_dimension_rows(
             "store_daily_promotion_campaigns", '"推广场景"', '"推广场景"', where,
             scene_expr='"推广场景"',
             group_exprs=('"推广场景"',),
+            invalid_buyer_dates=partial_dates,
         )
-        campaigns = self._promotion_dimension_rows(
-            "store_daily_promotion_campaigns", '"推广计划ID"', '"推广计划名称"', where,
-            scene_expr='"推广场景"', group_exprs=('"推广计划ID"', '"推广计划名称"', '"推广场景"'),
-        )
+        campaigns = self._promotion_campaign_rows(where, partial_dates)
         adgroups = self._promotion_dimension_rows(
             "store_daily_promotion_adgroups", '"推广单元ID"', '"推广单元名称"', where,
             scene_expr='"推广场景"', parent_id_expr='"推广计划ID"', parent_name_expr='"推广计划名称"',
             subject_id_expr='"商品ID"', subject_name_expr='"商品名称"', group_exprs=('"推广单元ID"', '"推广单元名称"', '"推广场景"', '"推广计划ID"', '"推广计划名称"', '"商品ID"', '"商品名称"'),
-            has_direct=False, has_new=False, has_member=False,
+            has_direct=False, has_buyers=False, has_new=False, has_member=False, invalid_buyer_dates=partial_dates,
         )
         audiences = self._promotion_dimension_rows(
             "store_daily_promotion_crowds", '"人群ID"', '"人群名称"', where,
             scene_expr='"推广场景"', parent_id_expr='"推广单元ID"', parent_name_expr='"推广单元名称"',
             subject_id_expr='"主体ID"', subject_name_expr='"主体名称"', group_exprs=('"人群ID"', '"人群名称"', '"推广场景"', '"推广单元ID"', '"推广单元名称"', '"主体ID"', '"主体名称"'),
-            has_direct=False,
+            has_direct=False, invalid_buyer_dates=partial_dates,
         )
         keywords = self._promotion_dimension_rows(
             "store_daily_promotion_bidwords", '"关键词ID"', '"关键词名称"', where,
             scene_expr='"推广场景"', parent_id_expr='"推广单元ID"', parent_name_expr='"推广单元名称"',
             subject_id_expr='"商品ID"', subject_name_expr='"商品名称"', group_exprs=('"关键词ID"', '"关键词名称"', '"推广场景"', '"推广单元ID"', '"推广单元名称"', '"商品ID"', '"商品名称"'),
-            has_direct=True,
+            has_direct=True, invalid_buyer_dates=partial_dates,
         )
         items = self._promotion_dimension_rows(
             "store_daily_promotion_items", '"商品ID"', '"商品名称"', where,
             scene_expr='"推广场景"', parent_id_expr='"推广计划ID"', parent_name_expr='"推广计划名称"',
             subject_id_expr='"商品ID"', subject_name_expr='"商品名称"', group_exprs=('"商品ID"', '"商品名称"', '"推广场景"', '"推广计划ID"', '"推广计划名称"'),
-            has_direct=True,
+            has_direct=True, invalid_buyer_dates=partial_dates,
         )
         contents = self._promotion_dimension_rows(
             "store_daily_promotion_contents", '"内容ID"', '"内容名称"', where,
             scene_expr='"推广场景"', parent_id_expr='"推广计划ID"', parent_name_expr='"推广计划名称"',
             subject_id_expr='"内容ID"', subject_name_expr='"内容名称"', group_exprs=('"内容ID"', '"内容名称"', '"推广场景"', '"推广计划ID"', '"推广计划名称"'),
-            has_direct=False, has_buyers=False, has_new=False, has_member=False,
+            has_direct=False, has_buyers=False, has_new=False, has_member=False, invalid_buyer_dates=partial_dates,
         )
         coverage = [self._promotion_layer_coverage(key, label, table, entity, start_date, end_date) for key, label, table, entity in (
             ("campaigns", "推广计划", "store_daily_promotion_campaigns", "推广计划ID"),
@@ -995,23 +1054,175 @@ class LocalWarehouseAnalyticsRepository:
             ("items", "推广商品", "store_daily_promotion_items", "商品ID"),
             ("contents", "推广内容", "store_daily_promotion_contents", "内容ID"),
         )]
+        data_quality.incomplete_layers = [
+            f"{layer.label} {layer.covered_days}/{len(expected_dates)} 天"
+            for layer in coverage
+            if layer.covered_days < len(expected_dates)
+        ]
+        if data_quality.incomplete_layers and data_quality.status == "complete":
+            data_quality.status = "partial"
         return PromotionWorkbenchResponse(
             range_start=start_date, range_end=end_date, summary=summary,
             daily_metrics=daily,
-            scenes=scenes, campaigns=campaigns, adgroups=adgroups, audiences=audiences, keywords=keywords, items=items, contents=contents, coverage=coverage,
+            scenes=scenes, campaigns=campaigns, adgroups=adgroups, audiences=audiences, keywords=keywords, items=items, contents=contents, coverage=coverage, data_quality=data_quality,
         )
 
     @staticmethod
-    def _promotion_summary(row: dict[str, object]) -> PromotionSummaryMetric:
-        impressions = _integer(row.get("impressions")); clicks = _integer(row.get("clicks")); spend = _decimal(row.get("spend")); paid = _decimal(row.get("paid_amount")); buyers = _integer(row.get("buyers")); new_buyers = _integer(row.get("new_buyers"))
-        return PromotionSummaryMetric(campaign_count=_integer(row.get("campaign_count")), impressions=impressions, clicks=clicks, spend=spend, paid_amount=paid, direct_paid_amount=_decimal(row.get("direct_paid_amount")), indirect_paid_amount=_decimal(row.get("indirect_paid_amount")), orders=_integer(row.get("orders")), buyers=buyers, carts=_integer(row.get("carts")), favorites=_integer(row.get("favorites")), new_buyers=new_buyers, member_paid_amount=_decimal(row.get("member_paid_amount")), roi=paid / spend if spend else Decimal("0"), click_rate=Decimal(clicks) / Decimal(impressions) * Decimal("100") if impressions else Decimal("0"), average_click_cost=spend / Decimal(clicks) if clicks else Decimal("0"), click_conversion_rate=Decimal(buyers) / Decimal(clicks) * Decimal("100") if clicks else Decimal("0"), buyer_acquisition_cost=spend / Decimal(buyers) if buyers else Decimal("0"), new_buyer_share=Decimal(new_buyers) / Decimal(buyers) * Decimal("100") if buyers else Decimal("0"))
+    def _promotion_summary(row: dict[str, object], daily: list[PromotionDailyMetric]) -> PromotionSummaryMetric:
+        impressions = _integer(row.get("impressions")); clicks = _integer(row.get("clicks")); spend = _decimal(row.get("spend")); paid = _decimal(row.get("paid_amount"))
+        valid_days = [item for item in daily if item.buyers is not None]
+        buyers = sum((item.buyers or 0) for item in valid_days) if valid_days else None
+        new_buyers = sum((item.new_buyers or 0) for item in valid_days) if valid_days else None
+        buyer_clicks = sum(item.clicks for item in valid_days)
+        buyer_spend = sum((item.spend for item in valid_days), Decimal("0"))
+        return PromotionSummaryMetric(campaign_count=_integer(row.get("campaign_count")), impressions=impressions, clicks=clicks, spend=spend, paid_amount=paid, direct_paid_amount=_decimal(row.get("direct_paid_amount")), indirect_paid_amount=_decimal(row.get("indirect_paid_amount")), orders=_integer(row.get("orders")), buyers=buyers, carts=_integer(row.get("carts")), favorites=_integer(row.get("favorites")), new_buyers=new_buyers, member_paid_amount=_decimal(row.get("member_paid_amount")), roi=paid / spend if spend else Decimal("0"), click_rate=Decimal(clicks) / Decimal(impressions) * Decimal("100") if impressions else Decimal("0"), average_click_cost=spend / Decimal(clicks) if clicks else Decimal("0"), click_conversion_rate=Decimal(buyers) / Decimal(buyer_clicks) * Decimal("100") if buyers is not None and buyer_clicks else None, buyer_acquisition_cost=buyer_spend / Decimal(buyers) if buyers else None, new_buyer_share=Decimal(new_buyers) / Decimal(buyers) * Decimal("100") if buyers and new_buyers is not None else None)
 
-    def _promotion_dimension_rows(self, table: str, id_expr: str, name_expr: str, where: tuple[object, ...], *, scene_expr: str = "''", parent_id_expr: str = "''", parent_name_expr: str = "''", subject_id_expr: str = "''", subject_name_expr: str = "''", group_exprs: tuple[str, ...], has_direct: bool = True, has_buyers: bool = True, has_new: bool = True, has_member: bool = True) -> list[PromotionDimensionMetric]:
-        direct = '"直接成交金额"' if has_direct else "'0'"; indirect = '"间接成交金额"' if has_direct else "'0'"; buyers = '"成交人数"' if has_buyers else "'0'"; new = '"成交新客数"' if has_new else "'0'"; member = '"会员成交金额"' if has_member else "'0'"; natural = '"自然流量转化金额"' if table == "store_daily_promotion_items" else "'0'"
-        dimensions = ", ".join(f"{expr} as d{index}" for index, expr in enumerate((id_expr, name_expr, scene_expr, parent_id_expr, parent_name_expr, subject_id_expr, subject_name_expr)))
+    def _promotion_campaign_rows(
+        self,
+        where: tuple[object, ...],
+        invalid_buyer_dates: list[date],
+    ) -> list[PromotionDimensionMetric]:
+        valid_expr = self._promotion_valid_date_expression(invalid_buyer_dates)
+        rows = self._rows(
+            f'''with ranked as (
+                select *, row_number() over (
+                    partition by "推广计划ID"
+                    order by "业务日期" desc, rowid desc
+                ) as identity_rank
+                from store_daily_promotion_campaigns
+                where "店铺ID" = ? and "业务日期" between ? and ?
+            )
+            select
+                "推广计划ID" as d0,
+                coalesce(nullif(max(case when identity_rank = 1 then "推广计划名称" end), ''), '未命名计划') as d1,
+                coalesce(nullif(max(case when identity_rank = 1 then "推广场景" end), ''), '未分类场景') as d2,
+                '' as d3, '' as d4, '' as d5, '' as d6,
+                sum(cast(coalesce("展现量", '0') as real)) impressions,
+                sum(cast(coalesce("点击量", '0') as real)) clicks,
+                sum(cast(coalesce("花费", '0') as real)) spend,
+                sum(cast(coalesce("总成交金额", '0') as real)) paid_amount,
+                sum(cast(coalesce("直接成交金额", '0') as real)) direct_paid_amount,
+                sum(cast(coalesce("间接成交金额", '0') as real)) indirect_paid_amount,
+                sum(cast(coalesce("总成交笔数", '0') as real)) orders,
+                sum(case when {valid_expr} then cast(coalesce("成交人数", '0') as real) else 0 end) buyers,
+                sum(cast(coalesce("总购物车数", '0') as real)) carts,
+                sum(cast(coalesce("总收藏数", '0') as real)) favorites,
+                sum(case when {valid_expr} then cast(coalesce("成交新客数", '0') as real) else 0 end) new_buyers,
+                sum(cast(coalesce("会员成交金额", '0') as real)) member_paid_amount,
+                0 as natural_paid_amount,
+                sum(case when {valid_expr} then cast(coalesce("点击量", '0') as real) else 0 end) buyer_metric_clicks,
+                sum(case when {valid_expr} then cast(coalesce("花费", '0') as real) else 0 end) buyer_metric_spend,
+                count(distinct case when {valid_expr} then "业务日期" end) buyer_metric_days
+            from ranked
+            group by "推广计划ID"
+            having spend > 0
+            order by spend desc''',
+            *where,
+        )
+        return self._promotion_metrics_from_rows(rows, has_buyers=True, has_new=True)
+
+    @staticmethod
+    def _promotion_valid_date_expression(invalid_dates: list[date]) -> str:
+        if not invalid_dates:
+            return "1 = 1"
+        values = ", ".join(f"'{item.isoformat()}'" for item in invalid_dates)
+        return f'"业务日期" not in ({values})'
+
+    def _promotion_dimension_rows(
+        self,
+        table: str,
+        id_expr: str,
+        name_expr: str,
+        where: tuple[object, ...],
+        *,
+        scene_expr: str = "''",
+        parent_id_expr: str = "''",
+        parent_name_expr: str = "''",
+        subject_id_expr: str = "''",
+        subject_name_expr: str = "''",
+        group_exprs: tuple[str, ...],
+        has_direct: bool = True,
+        has_buyers: bool = True,
+        has_new: bool = True,
+        has_member: bool = True,
+        invalid_buyer_dates: list[date] | None = None,
+    ) -> list[PromotionDimensionMetric]:
+        direct = '"直接成交金额"' if has_direct else "'0'"
+        indirect = '"间接成交金额"' if has_direct else "'0'"
+        buyers = '"成交人数"' if has_buyers else "'0'"
+        new_buyers = '"成交新客数"' if has_new else "'0'"
+        member = '"会员成交金额"' if has_member else "'0'"
+        natural = '"自然流量转化金额"' if table == "store_daily_promotion_items" else "'0'"
+        valid_expr = self._promotion_valid_date_expression(invalid_buyer_dates or [])
+        buyer_valid_expr = valid_expr if has_buyers else "0 = 1"
+        dimensions = ", ".join(
+            f"{expr} as d{index}"
+            for index, expr in enumerate((id_expr, name_expr, scene_expr, parent_id_expr, parent_name_expr, subject_id_expr, subject_name_expr))
+        )
         groups = ", ".join(group_exprs)
-        rows = self._rows(f'''select {dimensions}, sum(cast(coalesce("展现量", '0') as real)) impressions, sum(cast(coalesce("点击量", '0') as real)) clicks, sum(cast(coalesce("花费", '0') as real)) spend, sum(cast(coalesce("总成交金额", '0') as real)) paid_amount, sum(cast(coalesce({direct}, '0') as real)) direct_paid_amount, sum(cast(coalesce({indirect}, '0') as real)) indirect_paid_amount, sum(cast(coalesce("总成交笔数", '0') as real)) orders, sum(cast(coalesce({buyers}, '0') as real)) buyers, sum(cast(coalesce("总购物车数", '0') as real)) carts, sum(cast(coalesce("总收藏数", '0') as real)) favorites, sum(cast(coalesce({new}, '0') as real)) new_buyers, sum(cast(coalesce({member}, '0') as real)) member_paid_amount, sum(cast(coalesce({natural}, '0') as real)) natural_paid_amount from {table} where "店铺ID" = ? and "业务日期" between ? and ? group by {groups} having spend > 0 order by spend desc''', *where)
-        return [PromotionDimensionMetric(dimension_id=str(row["d0"] or ""), dimension_name=str(row["d1"] or "未命名"), scene_name=str(row["d2"] or "未分类"), parent_id=str(row["d3"] or ""), parent_name=str(row["d4"] or ""), subject_id=str(row["d5"] or ""), subject_name=str(row["d6"] or ""), impressions=_integer(row["impressions"]), clicks=_integer(row["clicks"]), spend=_decimal(row["spend"]), paid_amount=_decimal(row["paid_amount"]), direct_paid_amount=_decimal(row["direct_paid_amount"]), indirect_paid_amount=_decimal(row["indirect_paid_amount"]), orders=_integer(row["orders"]), buyers=_integer(row["buyers"]), carts=_integer(row["carts"]), favorites=_integer(row["favorites"]), new_buyers=_integer(row["new_buyers"]), member_paid_amount=_decimal(row["member_paid_amount"]), natural_paid_amount=_decimal(row["natural_paid_amount"])) for row in rows]
+        rows = self._rows(
+            f'''select {dimensions},
+                sum(cast(coalesce("展现量", '0') as real)) impressions,
+                sum(cast(coalesce("点击量", '0') as real)) clicks,
+                sum(cast(coalesce("花费", '0') as real)) spend,
+                sum(cast(coalesce("总成交金额", '0') as real)) paid_amount,
+                sum(cast(coalesce({direct}, '0') as real)) direct_paid_amount,
+                sum(cast(coalesce({indirect}, '0') as real)) indirect_paid_amount,
+                sum(cast(coalesce("总成交笔数", '0') as real)) orders,
+                sum(case when {buyer_valid_expr} then cast(coalesce({buyers}, '0') as real) else 0 end) buyers,
+                sum(cast(coalesce("总购物车数", '0') as real)) carts,
+                sum(cast(coalesce("总收藏数", '0') as real)) favorites,
+                sum(case when {buyer_valid_expr} then cast(coalesce({new_buyers}, '0') as real) else 0 end) new_buyers,
+                sum(cast(coalesce({member}, '0') as real)) member_paid_amount,
+                sum(cast(coalesce({natural}, '0') as real)) natural_paid_amount,
+                sum(case when {buyer_valid_expr} then cast(coalesce("点击量", '0') as real) else 0 end) buyer_metric_clicks,
+                sum(case when {buyer_valid_expr} then cast(coalesce("花费", '0') as real) else 0 end) buyer_metric_spend,
+                count(distinct case when {buyer_valid_expr} then "业务日期" end) buyer_metric_days
+            from {table}
+            where "店铺ID" = ? and "业务日期" between ? and ?
+            group by {groups}
+            having spend > 0
+            order by spend desc''',
+            *where,
+        )
+        return self._promotion_metrics_from_rows(rows, has_buyers=has_buyers, has_new=has_new)
+
+    @staticmethod
+    def _promotion_metrics_from_rows(
+        rows: list[dict[str, object]],
+        *,
+        has_buyers: bool,
+        has_new: bool,
+    ) -> list[PromotionDimensionMetric]:
+        metrics: list[PromotionDimensionMetric] = []
+        for row in rows:
+            buyer_metric_days = _integer(row["buyer_metric_days"])
+            metrics.append(PromotionDimensionMetric(
+                dimension_id=str(row["d0"] or ""),
+                dimension_name=str(row["d1"] or "未命名"),
+                scene_name=str(row["d2"] or "未分类"),
+                parent_id=str(row["d3"] or ""),
+                parent_name=str(row["d4"] or ""),
+                subject_id=str(row["d5"] or ""),
+                subject_name=str(row["d6"] or ""),
+                impressions=_integer(row["impressions"]),
+                clicks=_integer(row["clicks"]),
+                spend=_decimal(row["spend"]),
+                paid_amount=_decimal(row["paid_amount"]),
+                direct_paid_amount=_decimal(row["direct_paid_amount"]),
+                indirect_paid_amount=_decimal(row["indirect_paid_amount"]),
+                orders=_integer(row["orders"]),
+                buyers=_integer(row["buyers"]) if has_buyers and buyer_metric_days else None,
+                carts=_integer(row["carts"]),
+                favorites=_integer(row["favorites"]),
+                new_buyers=_integer(row["new_buyers"]) if has_new and buyer_metric_days else None,
+                member_paid_amount=_decimal(row["member_paid_amount"]),
+                natural_paid_amount=_decimal(row["natural_paid_amount"]),
+                buyer_metric_clicks=_integer(row["buyer_metric_clicks"]),
+                buyer_metric_spend=_decimal(row["buyer_metric_spend"]),
+                buyer_metric_days=buyer_metric_days,
+            ))
+        return metrics
 
     def _promotion_layer_coverage(self, key: str, label: str, table: str, entity: str, start_date: date, end_date: date) -> PromotionLayerCoverage:
         rows = self._rows(f'''select count(*) rows, count(distinct "业务日期") covered_days, count(distinct "{entity}") entity_count from {table} where "店铺ID" = ? and "业务日期" between ? and ?''', self._store_id, start_date.isoformat(), end_date.isoformat())
@@ -1664,7 +1875,16 @@ class LocalWarehouseAnalyticsRepository:
         )
 
     def _member_analysis(self, start_date: date, end_date: date) -> MemberAnalysis:
-        latest = self._latest_row("store_daily_member_analysis_overviews", start_date, end_date) or {}
+        latest_rows = self._rows(
+            '''select * from store_daily_member_analysis_overviews
+               where "店铺ID" = ? and "业务日期" between ? and ?
+                 and (nullif(trim("会员总数"), '') is not null
+                   or nullif(trim("高频复购会员"), '') is not null
+                   or nullif(trim("复购周期"), '') is not null)
+               order by "业务日期" desc limit 1''',
+            self._store_id, start_date.isoformat(), end_date.isoformat(),
+        )
+        latest = latest_rows[0] if latest_rows else {}
         row = self._aggregate(
             "store_daily_member_analysis_overviews",
             ("会员成交人数", "会员成交金额", "复购会员数", "会员复购金额", "新增会员数", "新会员成交人数"),
@@ -1691,10 +1911,21 @@ class LocalWarehouseAnalyticsRepository:
                 sum(cast(coalesce("新会员成交金额", '0') as real)) as paid_amount
                from store_daily_member_channels
                where "店铺ID" = ? and "业务日期" between ? and ?
-               group by "入会渠道" order by new_members desc limit 10''',
+               group by "入会渠道" order by new_members desc''',
             self._store_id, start_date.isoformat(), end_date.isoformat(),
         )
+        overview_dates = [str(item["business_day"]) for item in daily_rows if any(item.get(key) not in (None, "") for key in ("paid_members", "paid_amount", "repurchase_members", "repurchase_amount", "new_members", "new_paid_members"))]
+        channel_date_rows = self._rows(
+            '''select max("业务日期") as latest_date from store_daily_member_channels
+               where "店铺ID" = ? and "业务日期" between ? and ?''',
+            self._store_id, start_date.isoformat(), end_date.isoformat(),
+        )
+        valid_daily_rows = [item for item in daily_rows if any(item.get(key) not in (None, "") for key in ("paid_members", "paid_amount", "repurchase_members", "repurchase_amount", "new_members", "new_paid_members"))]
         return MemberAnalysis(
+            asset_date=date.fromisoformat(str(latest["业务日期"])) if latest.get("业务日期") else None,
+            overview_latest_date=date.fromisoformat(max(overview_dates)) if overview_dates else None,
+            channel_latest_date=date.fromisoformat(str(channel_date_rows[0]["latest_date"])) if channel_date_rows and channel_date_rows[0].get("latest_date") else None,
+            channel_new_members=sum(_integer(item["new_members"]) for item in channel_rows),
             total_members=_integer(latest.get("会员总数")),
             paid_members=paid_members,
             paid_amount=paid_amount,
@@ -1721,7 +1952,7 @@ class LocalWarehouseAnalyticsRepository:
                     new_members=_integer(item["new_members"]),
                     new_paid_members=_integer(item["new_paid_members"]),
                 )
-                for item in daily_rows
+                for item in valid_daily_rows
             ],
             channels=[
                 MemberChannelMetric(
@@ -2019,6 +2250,47 @@ class LocalWarehouseAnalyticsRepository:
             )
             for item in daily_rows
         ]
+        product_rows = self._rows(
+            '''select items."商品ID" as product_id,
+                max(coalesce(nullif(items."商品名称", ''), '未命名商品')) as product_name,
+                max(coalesce(nullif(catalog."系列", ''), '未分类')) as series,
+                max(coalesce(nullif(catalog."定位", ''), '未分类')) as positioning,
+                sum(cast(coalesce(items."淘客进店UV", '0') as real)) as entry_visitors,
+                sum(cast(coalesce(items."付款金额", '0') as real)) as paid_amount,
+                sum(cast(coalesce(items."付款笔数", '0') as real)) as paid_order_count,
+                sum(cast(coalesce(items."付款人数", '0') as real)) as paid_buyer_count,
+                sum(cast(coalesce(items."预估总费用", '0') as real)) as estimated_expense,
+                sum(cast(coalesce(items."结算金额", '0') as real)) as settled_amount,
+                sum(cast(coalesce(items."结算总费用", '0') as real)) as settled_expense
+               from store_daily_cps_items items
+               left join store_product_catalog catalog
+                 on catalog."店铺ID" = items."店铺ID" and catalog."商品ID" = items."商品ID"
+              where items."店铺ID" = ? and items."业务日期" between ? and ?
+              group by items."商品ID"
+              order by paid_amount desc''',
+            self._store_id, start_date.isoformat(), end_date.isoformat(),
+        )
+        product_metrics = []
+        for item in product_rows:
+            item_paid_amount = _decimal(item["paid_amount"])
+            entry_visitors = _integer(item["entry_visitors"])
+            paid_order_count = _integer(item["paid_order_count"])
+            estimated_expense = _decimal(item["estimated_expense"])
+            product_metrics.append(CpsProductMetric(
+                product_id=str(item["product_id"] or ""),
+                product_name=str(item["product_name"] or "未命名商品"),
+                series=str(item["series"] or "未分类"),
+                positioning=str(item["positioning"] or "未分类"),
+                entry_visitors=entry_visitors,
+                paid_amount=item_paid_amount,
+                paid_order_count=paid_order_count,
+                paid_buyer_count=_integer(item["paid_buyer_count"]),
+                estimated_expense=estimated_expense,
+                settled_amount=_decimal(item["settled_amount"]),
+                settled_expense=_decimal(item["settled_expense"]),
+                conversion_rate=Decimal(paid_order_count) / Decimal(entry_visitors) if entry_visitors else Decimal("0"),
+                expense_rate=estimated_expense / item_paid_amount if item_paid_amount else Decimal("0"),
+            ))
         paid_amount = _decimal(row.get("CPS付款金额"))
         payment_expense = _decimal(row.get("CPS付款佣金支出")) + _decimal(row.get("CPS付款服务费支出")) + _decimal(row.get("CPS付款营销服务费支出"))
         settlement_amount = _decimal(row.get("CPS结算金额"))
@@ -2039,6 +2311,7 @@ class LocalWarehouseAnalyticsRepository:
             preorder_deposit_amount=_decimal(row.get("CPS预售定金金额")),
             preorder_total_amount=_decimal(row.get("CPS预估预售整单金额")),
             daily_metrics=daily_metrics,
+            product_metrics=product_metrics,
         )
 
     def _content_analysis(self, start_date: date, end_date: date) -> ContentAnalysis:

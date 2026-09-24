@@ -7,7 +7,7 @@ import sys
 import time
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -150,9 +150,15 @@ def _request_report_page_with_retry(
         status, body = result
         try:
             payload = json.loads(body.decode("utf-8"))
-            value = payload.get("data", {}).get("value", {})
-            if isinstance(value, dict) and isinstance(value.get("page"), dict):
-                return result
+            data = payload.get("data")
+            if isinstance(data, dict):
+                # ``value`` present but null means the platform legitimately has
+                # no rows for the requested day — do not burn retries on it.
+                if "value" in data and data.get("value") is None:
+                    return result
+                value = data.get("value", {})
+                if isinstance(value, dict) and isinstance(value.get("page"), dict):
+                    return result
         except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
             pass
         if attempt + 1 < attempts:
@@ -244,14 +250,32 @@ def _response_page(response_body: bytes) -> tuple[int, int, int]:
 
 
 def _payload_page(payload: dict[str, Any]) -> tuple[int, int, int]:
+    """Read the pagination block, tolerating a legitimate empty-report day.
+
+    Some business days come back as ``data.value = null`` (or with an empty
+    ``value`` mapping) instead of a normal paginated payload.  That is a
+    *successful* run with zero rows, not a failure, so it must map to
+    ``(0, 0, 0)`` and let the caller's ``sum(counts) == 0`` branch record the
+    day as ``no_data`` instead of ``failed``.
+    """
+    data = payload.get("data")
+    if not isinstance(data, Mapping):
+        raise RuntimeError("U先 response is missing data.")
+    value = data.get("value")
+    if value is None:
+        return 0, 0, 0
+    if not isinstance(value, Mapping):
+        raise RuntimeError("U先 response data.value is not an object.")
+    page = value.get("page")
+    if page is None:
+        return 0, 0, 0
     try:
-        page = payload["data"]["value"]["page"]
         return (
-            int(page.get("count", 0)),
-            int(page.get("limit", 0)),
-            int(page.get("offset", 0)),
+            int(page.get("count", 0) or 0),
+            int(page.get("limit", 0) or 0),
+            int(page.get("offset", 0) or 0),
         )
-    except (KeyError, TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
         raise RuntimeError("U先 response is missing data.value.page pagination metadata.") from exc
 
 

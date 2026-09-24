@@ -41,17 +41,17 @@ const performanceScatterOption = computed(() => {
     xAxis: {
       type: "value", name: "接待率", nameLocation: "middle", nameGap: 38,
       min: 0, max: 100, splitNumber: 5,
-      nameTextStyle: { color: "#718078", fontSize: 11, fontWeight: 600 },
+      nameTextStyle: { color: "#718078", fontSize: 12, fontWeight: 600 },
       axisLine: { lineStyle: { color: "#aebbb4" } }, axisTick: { show: false },
-      axisLabel: { color: "#7c8982", fontSize: 10, formatter: "{value}%", margin: 10 },
+      axisLabel: { color: "#7c8982", fontSize: 12, formatter: "{value}%", margin: 10 },
       splitLine: { lineStyle: { color: "#edf1ef" } },
     },
     yAxis: {
       type: "value", name: "咨询成交率", nameLocation: "middle", nameGap: 52,
       min: 0, max: 100, splitNumber: 5,
-      nameTextStyle: { color: "#718078", fontSize: 11, fontWeight: 600 },
+      nameTextStyle: { color: "#718078", fontSize: 12, fontWeight: 600 },
       axisLine: { lineStyle: { color: "#aebbb4" } }, axisTick: { show: false },
-      axisLabel: { color: "#7c8982", fontSize: 10, formatter: "{value}%", margin: 10 },
+      axisLabel: { color: "#7c8982", fontSize: 12, formatter: "{value}%", margin: 10 },
       splitLine: { lineStyle: { color: "#edf1ef" } },
     },
     series: [{
@@ -62,7 +62,7 @@ const performanceScatterOption = computed(() => {
       data: rankedAccounts.value.map((item) => [item.reception_rate, item.sales_conversion_rate, item.sales_amount, item.account_name, item.consult_users]),
       markLine: {
         symbol: ["none", "none"],
-        label: { color: "#5d7065", fontSize: 9, padding: [3, 5], backgroundColor: "rgba(255,255,255,.88)", borderRadius: 3 },
+        label: { color: "#5d7065", fontSize: 12, padding: [3, 5], backgroundColor: "rgba(255,255,255,.88)", borderRadius: 3 },
         lineStyle: { color: "#b8c9bf", type: "dashed" },
         data: [
           { xAxis: teamReception, label: { formatter: `团队接待 ${teamReception.toFixed(1)}%`, position: "insideEndTop" } },

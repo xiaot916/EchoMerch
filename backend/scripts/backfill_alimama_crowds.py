@@ -22,9 +22,11 @@ from app.modules.imports.crawl_run_store import CrawlRunStore  # noqa: E402
 from app.warehouse.store import WarehouseStore  # noqa: E402
 from scripts.fetch_alimama_rtb_report import (  # noqa: E402
     REPORT_CONFIG,
+    alimama_browser_fallback_port,
     alimama_report_home,
     fetch_alimama_report,
 )
+from scripts.alimama_report_quality import preserve_existing_rows_on_empty_refresh  # noqa: E402
 
 
 DEFAULT_STORE_NAME = "碧芭宝贝旗舰店"
@@ -140,6 +142,13 @@ def main() -> int:
                     runtime.session.cookie_header if runtime else "",
                     runtime.csrf_id if runtime else "",
                     runtime.login_point_id if runtime else "",
+                )
+                preserve_existing_rows_on_empty_refresh(
+                    database,
+                    table=PROMOTION_CROWD_TABLE,
+                    store_id=args.store_id,
+                    business_day=business_day,
+                    source_rows=source_rows,
                 )
                 result = warehouse.ingest_alimama_crowd_report(
                     source_path=response_path,
@@ -290,6 +299,7 @@ def _fetch_page(
         offset=offset,
         page_size=args.page_size,
         timeout=args.timeout,
+        browser_port=alimama_browser_fallback_port(args.session_source, args.browser_port),
     )
     if not 200 <= status < 300 or code != 0:
         raise RuntimeError(

@@ -28,7 +28,7 @@ const router = createRouter({
       children: [
         { path: "", name: "overview", component: () => import("@/views/OverviewView.vue"), meta: { title: "经营概览", eyebrow: "天猫经营数据", requiresDashboard: true, surface: "business", permission: "analytics.read", aiPageKey: "overview" } },
         { path: "ai", name: "ai", component: () => import("@/views/AIDecisionView.vue"), meta: { title: "AI 决策中心", eyebrow: "经营数据助手", requiresDashboard: false, surface: "business", permission: "analytics.read" } },
-        { path: "analytics", name: "analytics", component: () => import("@/views/AnalyticsView.vue"), meta: { title: "交易分析", eyebrow: "交易与效率", requiresDashboard: true, surface: "business", permission: "analytics.read", aiPageKey: "analytics" } },
+        { path: "analytics", redirect: { name: "overview" }, meta: { title: "经营概览", eyebrow: "天猫经营数据", requiresDashboard: true, surface: "business", permission: "analytics.read" } },
         { path: "products", name: "products", component: () => import("@/views/ProductsView.vue"), meta: { title: "商品表现", eyebrow: "商品经营洞察", requiresDashboard: true, surface: "business", permission: "analytics.read", aiPageKey: "products" } },
         { path: "traffic", name: "traffic", component: () => import("@/views/TrafficView.vue"), meta: { title: "流量归因", eyebrow: "来源与访客质量", requiresDashboard: true, surface: "business", permission: "analytics.read", aiPageKey: "traffic" } },
         { path: "promotions", name: "promotions", component: () => import("@/views/PromotionsView.vue"), meta: { title: "推广分析", eyebrow: "渠道与投入产出", requiresDashboard: true, surface: "business", permission: "analytics.read", aiPageKey: "promotions" } },
@@ -46,6 +46,7 @@ const router = createRouter({
         { path: "content", name: "content", component: () => import("@/views/ContentView.vue"), meta: { title: "内容概览", eyebrow: "内容经营", requiresDashboard: true, surface: "business", permission: "analytics.read", aiPageKey: "content" } },
         { path: "live", name: "live", component: () => import("@/views/LiveView.vue"), meta: { title: "直播分析", eyebrow: "内容与服务 / 直播经营", requiresDashboard: true, surface: "business", permission: "analytics.read", aiPageKey: "live" } },
         { path: "market", name: "market", component: () => import("@/views/MarketView.vue"), meta: { title: "市场洞察", eyebrow: "市场分析", requiresDashboard: true, surface: "business", permission: "analytics.read", aiPageKey: "market" } },
+        { path: "big-screen", name: "big-screen", component: () => import("@/views/BigScreenView.vue"), meta: { title: "经营大屏", eyebrow: "全渠道 KPI 与可视化", requiresDashboard: false, surface: "business", permission: "analytics.read" } },
         { path: "brand-assets", name: "brand-assets", component: () => import("@/views/BrandAssetsView.vue"), meta: { title: "品牌资产", eyebrow: "品牌", requiresDashboard: false, surface: "system", permission: "brand_assets.read", aiPageKey: "brand-assets" } },
         { path: "products/analysis", name: "product-analysis", component: () => import("@/views/ProductAnalysisView.vue"), meta: { title: "单品分析", eyebrow: "商品经营 / 单品下钻", requiresDashboard: true, surface: "business", permission: "analytics.read", aiPageKey: "product-analysis" } },
         { path: "brand-assets/products", redirect: { name: "product-analysis" } },
@@ -56,9 +57,6 @@ const router = createRouter({
         { path: "inventory", name: "inventory", component: () => import("@/views/InventoryView.vue"), meta: { title: "库存管理", eyebrow: "商品编码与库存快照", requiresDashboard: false, surface: "system", permission: "analytics.read", aiPageKey: "inventory" } },
         { path: "imports/settings", name: "imports-settings", component: () => import("@/views/CollectionSettingsView.vue"), meta: { title: "采集设置", eyebrow: "采集环境与安全边界", requiresDashboard: false, surface: "system", permission: "data.manage" } },
         { path: "reviews", name: "reviews", component: () => import("@/views/ReviewsView.vue"), meta: { title: "评价分析", eyebrow: "商品质量与用户反馈", requiresDashboard: false, surface: "system", permission: "analytics.read", aiPageKey: "reviews" } },
-        { path: "captures", name: "captures", component: () => import("@/views/CapturesView.vue"), meta: { title: "采集实验室", eyebrow: "开发诊断", requiresDashboard: false, surface: "system", permission: "system.manage" } },
-        { path: "contracts", name: "contracts", component: () => import("@/views/ContractsView.vue"), meta: { title: "接口契约", eyebrow: "开发诊断", requiresDashboard: false, surface: "system", permission: "system.manage" } },
-        { path: "operations", name: "operations", component: () => import("@/views/OperationsView.vue"), meta: { title: "批量操作", eyebrow: "Preview First", requiresDashboard: false, surface: "system", permission: "system.manage" } },
         { path: "system/users", name: "system-users", component: () => import("@/views/AccessView.vue"), meta: { title: "用户管理", eyebrow: "系统设置", requiresDashboard: false, surface: "system", permission: "system.manage" } },
         { path: "system/roles", name: "system-roles", component: () => import("@/views/RoleManagementView.vue"), meta: { title: "角色管理", eyebrow: "系统设置", requiresDashboard: false, surface: "system", permission: "system.manage" } },
         { path: "system/menus", name: "system-menus", component: () => import("@/views/MenuManagementView.vue"), meta: { title: "菜单管理", eyebrow: "系统设置", requiresDashboard: false, surface: "system", permission: "system.manage" } },
@@ -90,7 +88,7 @@ const router = createRouter({
 })
 
 const routeMenuCodes: Record<string, string> = {
-  overview: "route:overview", ai: "route:ai", analytics: "route:analytics", traffic: "route:traffic",
+  overview: "route:overview", ai: "route:ai", traffic: "route:traffic",
   customers: "route:customers", "customer-members": "route:customer-members", products: "route:products",
   "product-analysis": "route:product-analysis", reviews: "route:reviews", promotions: "route:promotions",
   "promotions-cps": "route:promotions-cps", "marketing-activities": "route:marketing-activities",
@@ -98,6 +96,7 @@ const routeMenuCodes: Record<string, string> = {
   "marketing-shopping-gold": "route:marketing-shopping-gold", "marketing-bybt": "route:marketing-bybt",
   "marketing-utry": "route:marketing-utry",
   service: "route:service", content: "route:content", live: "route:live", market: "route:market",
+  "big-screen": "route:big-screen",
   "brand-assets": "route:brand-assets", "store-data": "route:store-data", inventory: "route:inventory", imports: "route:imports-tasks",
   "imports-tasks": "route:imports-tasks", "imports-overview": "route:imports-overview", "imports-settings": "route:imports-settings", "system-users": "route:system-users",
   "system-roles": "route:system-roles", "system-menus": "route:system-menus", "system-apis": "route:system-apis",

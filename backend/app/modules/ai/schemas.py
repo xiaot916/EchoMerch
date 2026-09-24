@@ -177,12 +177,34 @@ class PageAIProfileDescriptor(BaseModel):
 
 
 class PeriodReportRequest(BaseModel):
-    report_type: Literal["daily", "weekly", "monthly", "mtd", "daily_series"] = "daily"
+    report_type: Literal["daily", "weekly", "monthly", "mtd", "daily_series", "business_review"] = "daily"
     conversation_id: str | None = Field(default=None, min_length=8, max_length=120)
     anchor_date: date | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+    comparison_mode: Literal["previous_period", "same_period_last_year", "custom"] = "same_period_last_year"
+    comparison_start_date: date | None = None
+    comparison_end_date: date | None = None
+    report_title: str | None = Field(default=None, max_length=120)
     store_id: int | None = Field(default=None, ge=1)
     target_gmv: float | None = Field(default=None, ge=0)
+    planning_targets: dict[str, float | None] = Field(default_factory=dict)
+    business_events: list[str] = Field(default_factory=list, max_length=20)
+    strategy_notes: str = Field(default="", max_length=4000)
     use_model: bool = True
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.report_type != "business_review":
+            return
+        if bool(self.start_date) != bool(self.end_date):
+            raise ValueError("经营复盘必须同时提供开始和结束日期")
+        if self.start_date and self.end_date and self.start_date > self.end_date:
+            raise ValueError("经营复盘开始日期不能晚于结束日期")
+        if self.comparison_mode == "custom":
+            if not self.comparison_start_date or not self.comparison_end_date:
+                raise ValueError("自定义对比必须同时提供对比开始和结束日期")
+            if self.comparison_start_date > self.comparison_end_date:
+                raise ValueError("对比开始日期不能晚于对比结束日期")
 
 
 class PeriodReportResponse(BaseModel):

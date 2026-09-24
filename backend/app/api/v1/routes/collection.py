@@ -12,7 +12,9 @@ from app.core.config import settings
 from app.integrations.collection_browser import (
     CollectionBrowserLaunchError,
     browser_debug_connected,
+    inspect_seller_login,
     launch_collection_browser,
+    open_seller_login,
 )
 from app.integrations.jackyun_inventory import JackyunClient, JackyunIntegrationError
 from app.integrations.tmall_session import (
@@ -24,7 +26,7 @@ from app.integrations.tmall_session import (
     open_browser_platform_session,
 )
 from app.modules.access.service import Principal
-from app.core.business_days import parse_business_day, yesterday_in_shanghai
+from app.core.business_days import parse_business_day, today_in_shanghai, yesterday_in_shanghai
 from app.modules.collection.schemas import (
     BrowserHealth,
     CollectionBatch,
@@ -35,11 +37,13 @@ from app.modules.collection.schemas import (
     InventoryCredentialTestResponse,
     UpdateInventoryCredentialsRequest,
     PlatformSessionStatus,
+    SellerLoginStatus,
     StartCollectionRequest,
     UpdateCollectionScheduleRequest,
 )
 from app.modules.collection.locks import active_feedback_run
 from app.modules.collection.registry import COLLECTION_DATASET_KEYS
+from app.modules.collection.dates import CURRENT_DAY_ONLY_DATASETS, validate_collection_day
 from app.modules.collection.service import (
     CollectionBatchConflict,
     CollectionConfigurationError,
@@ -71,6 +75,11 @@ def start_collection(
 ) -> CollectionBatch:
     try:
         day = parse_business_day(request.day) if request.day else yesterday_in_shanghai()
+        requested_names = request.dataset_names or [
+            key for key in COLLECTION_DATASET_KEYS
+            if day == today_in_shanghai() or key not in CURRENT_DAY_ONLY_DATASETS
+        ]
+        validate_collection_day(requested_names, day)
         feedback_run = active_feedback_run(Path(settings.local_database_path))
         if feedback_run is not None:
             feedback_label, run_id = feedback_run
@@ -79,10 +88,10 @@ def start_collection(
             )
         if request.session_source == "drissionpage":
             _ensure_collection_browser()
-            _preflight_collection_sessions(request.dataset_names)
+            _preflight_collection_sessions(requested_names)
         return get_collection_service().start_batch(
             business_day=day,
-            dataset_names=request.dataset_names,
+            dataset_names=requested_names,
             session_source=request.session_source,
             refresh_existing=request.refresh_existing,
             trigger="manual",
@@ -146,6 +155,26 @@ def start_collection_browser(
     except (CollectionBrowserLaunchError, RuntimeSessionUnavailable) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _collection_health(platform_overrides={"sycm": probe})
+
+
+@router.get("/seller-login/status", response_model=SellerLoginStatus)
+def get_seller_login_status(
+    _: Principal = Depends(require_permission("data.manage")),
+) -> SellerLoginStatus:
+    return SellerLoginStatus.model_validate(
+        inspect_seller_login(settings.tmall_browser_port).__dict__
+    )
+
+
+@router.post("/seller-login/open", response_model=SellerLoginStatus)
+def open_seller_login_page(
+    _: Principal = Depends(require_permission("data.manage")),
+) -> SellerLoginStatus:
+    try:
+        result = open_seller_login(settings.tmall_browser_port)
+    except CollectionBrowserLaunchError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return SellerLoginStatus.model_validate(result.__dict__)
 
 
 @router.get("/health", response_model=BrowserHealth)
@@ -235,6 +264,8 @@ def get_collection_settings(_: Principal = Depends(require_permission("data.mana
         mode="worker_enabled",
         safety_rules=[
             "页面和接口不返回 Cookie、Token 或原始请求头。",
+            "千牛账号密码不落库；店铺登录复用独立浏览器 Profile 的加密会话。",
+            "二维码只在官方登录页展示，系统不保存二维码令牌。",
             "完整性查询使用只读连接，采集入库只由后台 Worker 执行。",
             "正式采集任务由 Worker 执行，HTTP 页面不在请求内运行爬虫。",
             "采集只读取平台报表，不执行商品、订单或广告计划写操作。",
@@ -294,7 +325,7 @@ def _preflight_collection_sessions(dataset_names: list[str]) -> None:
     if unknown:
         raise CollectionConfigurationError("未知数据集：" + ", ".join(sorted(unknown)))
     required = ["sycm"]
-    if "cps_overviews" in selected:
+    if {"cps_overviews", "cps_items"} & selected:
         required.append("cps")
     deadline = time.monotonic() + COLLECTION_PREFLIGHT_TIMEOUT_SECONDS
     for platform_code in required:

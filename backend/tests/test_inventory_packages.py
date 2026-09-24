@@ -124,6 +124,31 @@ def test_inventory_query_returns_calculated_package_stock(tmp_path: Path) -> Non
     assert [warehouse["assemblable_quantity"] for warehouse in item["warehouses"]] == [4, 2]
 
 
+def test_analysis_finds_decorated_package_code_and_keeps_components(tmp_path: Path) -> None:
+    service = InventoryService(tmp_path / "package-search.sqlite3")
+    service.upsert_package(
+        store_id=1,
+        product={"goodsId": "PKG-1", "skuId": "PKG-S1", "goodsNo": "++SM80KB70", "goodsName": "隔尿垫组合"},
+        components=[{"skuId": "CHILD-1", "goodsNo": "SM80KB70", "goodsAmount": 2}],
+    )
+    service.upsert_package(
+        store_id=1,
+        product={"goodsId": "PKG-2", "skuId": "PKG-S2", "goodsNo": "OTHER-2", "goodsName": "其他组合"},
+        components=[],
+    )
+
+    for with_snapshot in (False, True):
+        if with_snapshot:
+            service.upsert_inventory_snapshot(
+                store_id=1, business_day=date(2026, 8, 21),
+                rows=[{"warehouseId": "W1", "skuId": "CHILD-1", "goodsNo": "SM80KB70", "canUseQuantity": 5}],
+            )
+        for query in ("SM80KB70", "++SM80KB70", "隔尿垫"):
+            result = service.analysis(store_id=1, query=query)
+            assert result["package_summary"]["package_count"] == 1
+            assert result["package_rows"][0]["component_summary"] == ["SM80KB70 × 2"]
+
+
 def test_inventory_questions_select_inventory_skill() -> None:
     assert select_skill("这个组合品还能组多少套", "auto").descriptor.name == "inventory-query"
     assert select_skill("查大鱼 M 码库存", "inventory").descriptor.name == "inventory-query"

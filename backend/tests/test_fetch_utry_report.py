@@ -169,9 +169,16 @@ def test_utry_rejects_a_page_when_server_ignores_requested_offset(
         )
 
 
-def test_utry_persists_a_success_response_that_lacks_pagination_metadata(
+def test_utry_treats_a_missing_pagination_block_as_an_empty_day(
     monkeypatch, tmp_path: Path
 ) -> None:
+    """A success envelope without a pagination block means "no rows today".
+
+    The platform returns ``data.value = {"values": []}`` (or ``value = null``)
+    on days where the report legitimately has nothing to show.  That must be a
+    zero-row success so the backfill records ``no_data`` — not a hard failure.
+    """
+
     payload = {"code": 0, "data": {"value": {"values": []}}}
     monkeypatch.setattr(
         fetch_utry_report,
@@ -180,12 +187,57 @@ def test_utry_persists_a_success_response_that_lacks_pagination_metadata(
     )
     output = tmp_path / "missing-page.json"
 
-    with pytest.raises(RuntimeError, match="missing data.value.page"):
-        fetch_utry_report.fetch_utry_report(
-            template=_template(),
-            business_day=date(2026, 9, 6),
-            output=output,
-            cookie="t=runtime-session",
-        )
+    status, code, _, _, row_count, row_limit = fetch_utry_report.fetch_utry_report(
+        template=_template(),
+        business_day=date(2026, 9, 6),
+        output=output,
+        cookie="t=runtime-session",
+    )
 
+    assert (status, code) == (200, 0)
+    assert (row_count, row_limit) == (0, 0)
     assert json.loads(output.read_text(encoding="utf-8")) == payload
+
+
+def test_utry_treats_a_null_value_as_an_empty_day(monkeypatch, tmp_path: Path) -> None:
+    """``data.value = null`` is the 2026-09-15 shape and must not raise."""
+
+    payload = {"code": 0, "data": {"value": None}}
+    monkeypatch.setattr(
+        fetch_utry_report,
+        "urlopen",
+        lambda request, timeout: _Response(payload),
+    )
+    output = tmp_path / "null-value.json"
+
+    _, _, _, _, row_count, row_limit = fetch_utry_report.fetch_utry_report(
+        template=_template(),
+        business_day=date(2026, 9, 15),
+        output=output,
+        cookie="t=runtime-session",
+    )
+
+    assert (row_count, row_limit) == (0, 0)
+    assert json.loads(output.read_text(encoding="utf-8")) == payload
+
+
+def test_utry_does_not_retry_a_legitimate_empty_day(monkeypatch, tmp_path: Path) -> None:
+    """An empty-value response is definitive; do not burn the retry budget."""
+
+    payload = {"code": 0, "data": {"value": None}}
+    calls: list[int] = []
+
+    def _urlopen(request, timeout):
+        calls.append(1)
+        return _Response(payload)
+
+    monkeypatch.setattr(fetch_utry_report, "urlopen", _urlopen)
+
+    fetch_utry_report.fetch_utry_report(
+        template=_template(),
+        business_day=date(2026, 9, 15),
+        output=tmp_path / "no-retry.json",
+        cookie="t=runtime-session",
+    )
+
+    assert len(calls) == 1

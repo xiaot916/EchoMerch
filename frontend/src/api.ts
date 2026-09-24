@@ -1,5 +1,4 @@
 import type {
-  CaptureSummary,
   AccessDirectory,
   AccessRoleRecord,
   AccessUser,
@@ -7,14 +6,11 @@ import type {
   BrandAssetSummary,
   BrandRecord,
   AuthConfiguration,
-  ContractCatalog,
-  ContractSummary,
   CrawlRunDetail,
   CrawlRunList,
   CollectionBatch,
   CollectionOverview,
   CollectionSchedule,
-  DailyDryRunSummary,
   DashboardResponse,
   FlashSaleAnalysisResponse,
   UtryAnalysisResponse,
@@ -23,14 +19,12 @@ import type {
   ProductMetric,
   TrafficTreeNode,
   PromotionWorkbenchResponse,
-  ImportRunDetail,
-  ImportRunList,
-  OperationCenterSummary,
   StoreRecord,
   StoreActivityCalendarEvent,
   StoreDataCatalog,
   StoreDataPreview,
   BrowserHealth,
+  SellerLoginStatus,
   CollectionSettings,
   SystemCapabilities,
   ReviewAnalysis,
@@ -57,6 +51,10 @@ import type {
   InventoryCredentialTestResponse,
   UpdateInventoryCredentialsRequest,
   MarketInsightResponse,
+  BigScreenSummary,
+  BigScreenTrendPoint,
+  BigScreenTrafficSource,
+  BigScreenPromoRoiItem,
 } from "./types"
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "")
@@ -219,6 +217,15 @@ function normalizeAnalysis(analysis: NonNullable<DashboardResponse["analysis"]>)
         preorder_deposit_amount: numeric(item.preorder_deposit_amount),
         preorder_total_amount: numeric(item.preorder_total_amount),
       })),
+      product_metrics: (analysis.cps.product_metrics ?? []).map((item) => ({
+        ...item,
+        paid_amount: numeric(item.paid_amount),
+        estimated_expense: numeric(item.estimated_expense),
+        settled_amount: numeric(item.settled_amount),
+        settled_expense: numeric(item.settled_expense),
+        conversion_rate: percent(item.conversion_rate),
+        expense_rate: percent(item.expense_rate),
+      })),
     },
     content: {
       ...analysis.content,
@@ -326,6 +333,10 @@ function normalizeDashboard(payload: DashboardResponse): DashboardResponse {
       ...item,
       paid_amount: numeric(item.paid_amount),
       promotion_spend: numeric(item.promotion_spend),
+      promotion_attributed_paid_amount: numeric(item.promotion_attributed_paid_amount),
+      cps_paid_amount: numeric(item.cps_paid_amount),
+      cps_estimated_expense: numeric(item.cps_estimated_expense),
+      cps_entry_visitors: item.cps_entry_visitors,
     })),
     traffic_sources: payload.traffic_sources.map((item) => ({
       ...item,
@@ -416,6 +427,70 @@ async function apiPost<T>(path: string, body: Record<string, unknown>, signal?: 
 
     invalidateGetCache()
     return response.json() as Promise<T>
+}
+
+// ---------------------------------------------------------------------------
+// 推广智能（promotion-intel）—— 诊断 / 优化计划 / T+7 复盘
+// ---------------------------------------------------------------------------
+
+export interface PromotionIntelBaseline {
+  break_even_roi?: number
+  actual_cpc?: number
+  actual_roi?: number
+  customer_unit_price?: number
+  gross_margin?: number
+  baseline_cvr?: number
+}
+
+export interface PromotionDiagnoseBody {
+  campaigns?: Record<string, unknown>[]
+  crowds?: Record<string, unknown>[]
+  words?: Record<string, unknown>[]
+  word_packages?: Record<string, unknown>[]
+  daily_overview?: Record<string, unknown>
+  baseline?: PromotionIntelBaseline
+}
+
+export interface PromotionFinding {
+  code: string
+  severity: string
+  title: string
+  detail: string
+  targets: Record<string, unknown>[]
+}
+
+/** 跑 6 条硬规则诊断（词价越界 / 溢价反噬 / 裸投 / 智能定向 / 词包 / 渠道门槛）。 */
+export async function promoteDiagnose(
+  body: PromotionDiagnoseBody,
+  signal?: AbortSignal,
+): Promise<{ findings: PromotionFinding[] }> {
+  return apiPost<{ findings: PromotionFinding[] }>("/api/v1/promotion-intel/diagnose", body as unknown as Record<string, unknown>, signal)
+}
+
+/** 诊断 + 策略 → OptimizationPlan（draft 状态，需 preview/confirm 才执行）。 */
+export async function promoteBuildPlan(
+  body: PromotionDiagnoseBody,
+  batchName = "unnamed",
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  const query = new URLSearchParams({ batch_name: batchName })
+  const path = `/api/v1/promotion-intel/plan?${query.toString()}`
+  return apiPost<Record<string, unknown>>(path, body as unknown as Record<string, unknown>, signal)
+}
+
+export interface PromotionReviewBody {
+  plan: Record<string, unknown>
+  metrics?: { cvr?: number; roi?: number; charge?: number; gmv?: number }
+  review_day?: string
+  baseline?: PromotionIntelBaseline
+}
+
+/** T+7 复盘：CVR<2%→暂停 / ROI<保本→维持 / ≥保本→回加 25%。 */
+export async function promoteReview(
+  body: PromotionReviewBody,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  return apiPost<Record<string, unknown>>("/api/v1/promotion-intel/review", body as unknown as Record<string, unknown>, signal)
 }
 
 export async function analyzeWithAI(request: {
@@ -538,11 +613,20 @@ export async function streamAnalyzeWithAI(
 }
 
 export async function buildPeriodReport(request: {
-  report_type: "daily" | "weekly" | "monthly" | "mtd" | "daily_series"
+  report_type: "daily" | "weekly" | "monthly" | "mtd" | "daily_series" | "business_review"
   conversation_id?: string | null
   anchor_date?: string | null
+  start_date?: string | null
+  end_date?: string | null
+  comparison_mode?: "previous_period" | "same_period_last_year" | "custom"
+  comparison_start_date?: string | null
+  comparison_end_date?: string | null
+  report_title?: string | null
   store_id?: number | null
   target_gmv?: number | null
+  planning_targets?: Record<string, number | null>
+  business_events?: string[]
+  strategy_notes?: string
   use_model?: boolean
 }): Promise<PeriodReportResponse> {
   return apiPost<PeriodReportResponse>("/api/v1/ai/reports/period", request)
@@ -857,7 +941,7 @@ export async function fetchPromotionWorkbench(
   const payload = await apiGet<PromotionWorkbenchResponse>(`/api/v1/analytics/promotions${suffix}`, signal)
   const normalizeMetric = (item: PromotionWorkbenchResponse["campaigns"][number]) => ({
     ...item,
-    impressions: numeric(item.impressions), clicks: numeric(item.clicks), spend: numeric(item.spend), paid_amount: numeric(item.paid_amount), direct_paid_amount: numeric(item.direct_paid_amount), indirect_paid_amount: numeric(item.indirect_paid_amount), orders: numeric(item.orders), buyers: numeric(item.buyers), carts: numeric(item.carts), favorites: numeric(item.favorites), new_buyers: numeric(item.new_buyers), member_paid_amount: numeric(item.member_paid_amount), natural_paid_amount: numeric(item.natural_paid_amount),
+    impressions: numeric(item.impressions), clicks: numeric(item.clicks), spend: numeric(item.spend), paid_amount: numeric(item.paid_amount), direct_paid_amount: numeric(item.direct_paid_amount), indirect_paid_amount: numeric(item.indirect_paid_amount), orders: numeric(item.orders), buyers: optionalNumeric(item.buyers), carts: numeric(item.carts), favorites: numeric(item.favorites), new_buyers: optionalNumeric(item.new_buyers), member_paid_amount: numeric(item.member_paid_amount), natural_paid_amount: numeric(item.natural_paid_amount), buyer_metric_clicks: numeric(item.buyer_metric_clicks), buyer_metric_spend: numeric(item.buyer_metric_spend), buyer_metric_days: numeric(item.buyer_metric_days),
   })
   return {
     ...payload,
@@ -869,35 +953,6 @@ export async function fetchPromotionWorkbench(
 
 export async function fetchCapabilities(): Promise<SystemCapabilities> {
   return apiGet<SystemCapabilities>("/api/v1/system/capabilities")
-}
-
-export async function fetchCaptureSummary(): Promise<CaptureSummary> {
-  return apiGet<CaptureSummary>("/api/v1/captures/summary")
-}
-
-export async function fetchContractSummary(): Promise<ContractSummary> {
-  return apiGet<ContractSummary>("/api/v1/contracts/summary")
-}
-
-export async function fetchDailyContracts(limit = 40): Promise<ContractCatalog> {
-  return apiGet<ContractCatalog>(`/api/v1/contracts/endpoints?daily_only=true&limit=${limit}`)
-}
-
-export async function fetchDailyDryRun(day?: string): Promise<DailyDryRunSummary> {
-  const suffix = day ? `?day=${encodeURIComponent(day)}` : ""
-  return apiGet<DailyDryRunSummary>(`/api/v1/imports/daily-dry-run${suffix}`)
-}
-
-export async function fetchImportRuns(limit = 10): Promise<ImportRunList> {
-  return apiGet<ImportRunList>(`/api/v1/imports/runs?limit=${limit}`)
-}
-
-export async function fetchImportRun(runId: string): Promise<ImportRunDetail> {
-  return apiGet<ImportRunDetail>(`/api/v1/imports/runs/${encodeURIComponent(runId)}`)
-}
-
-export async function createDryRunImportRun(day?: string): Promise<ImportRunDetail> {
-  return apiPost<ImportRunDetail>("/api/v1/imports/runs/dry-run", day ? { day } : {})
 }
 
 export async function fetchCrawlRuns(limit = 10): Promise<CrawlRunList> {
@@ -967,6 +1022,10 @@ export async function fetchAnalyticsProducts(
     page_views: numeric(item.page_views),
     search_visitors: numeric(item.search_visitors),
     promotion_spend: numeric(item.promotion_spend),
+    promotion_attributed_paid_amount: numeric(item.promotion_attributed_paid_amount),
+    cps_paid_amount: numeric(item.cps_paid_amount),
+    cps_estimated_expense: numeric(item.cps_estimated_expense),
+    cps_entry_visitors: numeric(item.cps_entry_visitors),
   }))
 }
 
@@ -1016,6 +1075,10 @@ export async function fetchProductAnalysis(
     page_views: numeric(item.page_views),
     search_visitors: numeric(item.search_visitors),
     promotion_spend: numeric(item.promotion_spend),
+    promotion_attributed_paid_amount: numeric(item.promotion_attributed_paid_amount),
+    cps_paid_amount: numeric(item.cps_paid_amount),
+    cps_estimated_expense: numeric(item.cps_estimated_expense),
+    cps_entry_visitors: numeric(item.cps_entry_visitors),
   })
   return {
     ...payload,
@@ -1042,10 +1105,6 @@ export async function fetchActivityCalendar(
 ): Promise<StoreActivityCalendarEvent[]> {
   const query = new URLSearchParams({ start_date: startDate, end_date: endDate })
   return apiGet<StoreActivityCalendarEvent[]>(`/api/v1/warehouse/stores/${storeId}/activity-calendar?${query}`)
-}
-
-export async function fetchOperationSummary(): Promise<OperationCenterSummary> {
-  return apiGet<OperationCenterSummary>("/api/v1/operations/summary")
 }
 
 export async function fetchNotificationChannels(): Promise<NotificationChannel[]> {
@@ -1171,6 +1230,14 @@ export async function resetAccessUserPassword(userId: number, password: string):
 }
 export async function fetchCollectionHealth(signal?: AbortSignal): Promise<BrowserHealth> {
   return apiGet<BrowserHealth>("/api/v1/imports/health", signal)
+}
+
+export async function fetchSellerLoginStatus(): Promise<SellerLoginStatus> {
+  return apiGet<SellerLoginStatus>("/api/v1/imports/seller-login/status")
+}
+
+export async function openSellerLoginPage(): Promise<SellerLoginStatus> {
+  return apiPost<SellerLoginStatus>("/api/v1/imports/seller-login/open", {})
 }
 
 export async function startCollectionBrowser(): Promise<BrowserHealth> {
@@ -1360,4 +1427,20 @@ export async function downloadStoreData(options: {
   const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
   const fallback = disposition.match(/filename=([^;]+)/i)?.[1]?.replace(/^"|"$/g, "")
   return { blob: await response.blob(), filename: encoded ? decodeURIComponent(encoded) : fallback || "店铺数据." + options.format }
+}
+
+export async function fetchBigScreenSummary(signal?: AbortSignal): Promise<BigScreenSummary> {
+  return apiGet<BigScreenSummary>("/api/v1/reports/big-screen/summary", signal)
+}
+
+export async function fetchBigScreenTrends(signal?: AbortSignal): Promise<{ points: BigScreenTrendPoint[] }> {
+  return apiGet<{ points: BigScreenTrendPoint[] }>("/api/v1/reports/big-screen/trends", signal)
+}
+
+export async function fetchBigScreenTraffic(signal?: AbortSignal): Promise<{ sources: BigScreenTrafficSource[] }> {
+  return apiGet<{ sources: BigScreenTrafficSource[] }>("/api/v1/reports/big-screen/traffic", signal)
+}
+
+export async function fetchBigScreenPromotionRoi(signal?: AbortSignal): Promise<{ campaigns: BigScreenPromoRoiItem[] }> {
+  return apiGet<{ campaigns: BigScreenPromoRoiItem[] }>("/api/v1/reports/big-screen/promotion-roi", signal)
 }

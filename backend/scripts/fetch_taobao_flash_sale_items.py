@@ -16,7 +16,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "backend"))
 
 from app.integrations.tmall_session import add_session_source_arguments, resolve_runtime_session  # noqa: E402
-from scripts.fetch_taobao_flash_sale import FLASH_SALE_HOME_URL  # noqa: E402
+from scripts.fetch_taobao_flash_sale import (  # noqa: E402
+    FLASH_SALE_HOME_URL, FLASH_SALE_ITEMS_API_URL, _fetch_in_existing_browser,
+)
 
 
 @dataclass(frozen=True)
@@ -29,11 +31,12 @@ class FetchResult:
 
     @property
     def ok(self) -> bool:
-        return 200 <= self.status < 300 and self.code in (0, None)
+        return 200 <= self.status < 300 and self.code == 0
 
 
 def fetch_taobao_flash_sale_items(
-    *, day: date, output: Path, cookie: str, page: int = 1, page_size: int = 50, timeout: int = 30,
+    *, day: date, output: Path, cookie: str, page: int = 1, page_size: int = 50,
+    timeout: int = 30, browser_port: int | None = None,
 ) -> FetchResult:
     timestamp = int(datetime.combine(day, day_time.min, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp() * 1000)
     token = _cookie_value(cookie, "_tb_token_", "tb_token", "tb-token")
@@ -42,8 +45,9 @@ def fetch_taobao_flash_sale_items(
         "startTime": str(timestamp), "endTime": str(timestamp), "__sm_request__": "true",
         "_": str(int(time.time() * 1000)),
     }
+    url = FLASH_SALE_ITEMS_API_URL + "?" + urlencode(params)
     request = Request(
-        "https://sale.taobao.com/extend/api/tbhjItemDataQuery.json?" + urlencode(params),
+        url,
         headers={
             "accept": "*/*", "accept-language": "zh-CN,zh;q=0.9,en;q=0.8", "cookie": cookie,
             "origin": "https://myseller.taobao.com", "referer": "https://myseller.taobao.com/home.htm/ltao-home/",
@@ -57,12 +61,23 @@ def fetch_taobao_flash_sale_items(
             body, status = response.read(), response.status
     except HTTPError as exc:
         body, status = exc.read(), exc.code
-    output.write_bytes(body)
     try:
         payload = json.loads(body.decode("utf-8"))
-        code, message = _response_status(payload)
     except (UnicodeDecodeError, json.JSONDecodeError):
-        code, message = None, "non-json response"
+        if browser_port is not None:
+            try:
+                status, body = _fetch_in_existing_browser(
+                    browser_port, url, timeout=timeout, include_tb_token=True,
+                )
+            except RuntimeError:
+                output.write_bytes(body)
+                raise
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload = None
+    code, message = _response_status(payload) if payload is not None else (None, "non-json response")
+    output.write_bytes(body)
     return FetchResult(status, code, message, str(output), len(body))
 
 
@@ -108,7 +123,11 @@ def main() -> int:
         platform_name="淘宝秒杀",
         expected_hosts=("myseller.taobao.com",),
     )
-    result = fetch_taobao_flash_sale_items(day=args.day, output=args.output, cookie=session.cookie_header, page=args.page, page_size=args.page_size, timeout=args.timeout)
+    result = fetch_taobao_flash_sale_items(
+        day=args.day, output=args.output, cookie=session.cookie_header,
+        page=args.page, page_size=args.page_size, timeout=args.timeout,
+        browser_port=args.browser_port if args.session_source == "drissionpage" else None,
+    )
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
     return 0 if result.ok else 1
 

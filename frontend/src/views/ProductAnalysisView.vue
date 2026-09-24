@@ -153,12 +153,11 @@ onMounted(() => { void load() })
         </div>
       </div>
       <label class="product-analysis-select"><span>选择商品</span><select v-model="selectedProductId"><option v-for="item in filteredProducts" :key="item.product_id" :value="item.product_id">{{ item.product_id }} · {{ item.product_name }}</option></select></label>
-      <span class="product-analysis-coverage">商品日报覆盖 {{ number(products.length) }} 个商品</span>
     </section>
     <section class="product-analysis-identity"><div class="product-analysis-icon"><PackageSearch :size="22" /></div><div><p>{{ selectedProduct.series || "未分类系列" }} · {{ selectedProduct.positioning || "未设置定位" }}</p><h2>{{ selectedProduct.product_name }}</h2><span>商品 ID {{ selectedProduct.product_id }} · {{ selectedProduct.product_type || "未分类" }}</span></div><div class="product-analysis-meta"><span>成交金额</span><strong>{{ currency(selectedProduct.paid_amount) }}</strong><small>{{ number(selectedProduct.buyers) }} 位买家 · {{ ratio(selectedConversion) }} 转化</small></div></section>
-    <section class="metrics-grid product-analysis-metrics"><MetricCard label="支付金额" :value="currency(selectedProduct.paid_amount)" detail="所选区间商品成交" :icon="CircleDollarSign" tone="teal" /><MetricCard label="商品访客" :value="number(selectedProduct.visitors)" detail="详情页访客规模" :icon="Eye" tone="blue" /><MetricCard label="支付转化率" :value="ratio(selectedConversion)" detail="支付买家 / 商品访客" :icon="Target" tone="teal" /><MetricCard label="推广投入" :value="currency(selectedProduct.promotion_spend)" detail="商品日报推广消耗" :icon="BarChart3" tone="amber" /></section>
+    <section class="metrics-grid product-analysis-metrics"><MetricCard label="支付金额" :value="currency(selectedProduct.paid_amount)" detail="商品日报成交口径" :icon="CircleDollarSign" tone="teal" /><MetricCard label="推广归因成交" :value="currency(selectedProduct.promotion_attributed_paid_amount)" :detail="`商品推广消耗 ${currency(selectedProduct.promotion_spend)}`" :icon="BarChart3" tone="blue" definition="来自推广商品明细的归因成交，可能与其他渠道归因重叠。" /><MetricCard label="CPS 付款" :value="currency(selectedProduct.cps_paid_amount)" :detail="`预估费用 ${currency(selectedProduct.cps_estimated_expense)}`" :icon="Target" tone="amber" definition="CPS 商品付款为渠道归因口径，不与商品日报支付相加。" /><MetricCard label="CPS 费用率" :value="selectedProduct.cps_paid_amount ? ratio(selectedProduct.cps_estimated_expense / selectedProduct.cps_paid_amount * 100) : '--'" :detail="`${number(selectedProduct.cps_entry_visitors)} 进店 UV`" :icon="Eye" tone="coral" /></section>
     <section class="product-analysis-grid"><article class="panel product-analysis-trend"><div class="panel-heading"><div><p>商品趋势</p><h2>支付、访客与买家</h2></div><BarChart3 :size="18" /></div><BusinessChart v-if="daily.length" :option="trendOption" ariaLabel="单品支付金额访客和支付买家趋势" :height="300" /><EmptyState v-else title="暂无商品日趋势" detail="所选区间没有该商品的日报记录。" :icon="Filter" /></article><article class="panel product-analysis-diagnostic"><div class="panel-heading"><div><p>商品指标</p><h2>成交集中度与互动</h2></div><UsersRound :size="18" /></div><div class="product-analysis-signals"><div><span>Top 1 成交集中度</span><strong>{{ topOneShare.toFixed(1) }}%</strong><small>全量商品成交占比</small></div><div><span>Top 3 成交集中度</span><strong>{{ topThreeShare.toFixed(1) }}%</strong><small>全量商品成交占比</small></div><div><span>加购人数</span><strong>{{ number(selectedProduct.add_cart_users) }}</strong><small>当前区间</small></div><div><span>收藏人数</span><strong>{{ number(selectedProduct.favorite_users) }}</strong><small>当前区间</small></div></div><p class="panel-footnote">集中度按当前区间全量商品支付金额计算。</p></article></section>
-    <section class="product-analysis-grid"><article class="panel"><div class="panel-heading"><div><p>系列对比</p><h2>{{ selectedProduct.series || "未分类系列" }}成交贡献</h2></div><span class="panel-action">同系列商品</span></div><BusinessChart v-if="analysis?.peers?.length" :option="peerOption" ariaLabel="同系列商品成交金额对比" :height="300" /><EmptyState v-else title="暂无系列对比" detail="当前商品没有可比较的同系列商品。" /></article><article class="panel product-analysis-detail"><div class="panel-heading"><div><p>商品明细</p><h2>当前商品经营数据</h2></div><ShoppingCart :size="18" /></div><div class="product-analysis-detail-list"><div><span>支付买家</span><strong>{{ number(selectedProduct.buyers) }}</strong></div><div><span>加购人数</span><strong>{{ number(selectedProduct.add_cart_users) }}</strong></div><div><span>收藏人数</span><strong>{{ number(selectedProduct.favorite_users) }}</strong></div><div><span>商品浏览量</span><strong>{{ number(selectedProduct.page_views) }}</strong></div><div><span>搜索引导访客</span><strong>{{ number(selectedProduct.search_visitors) }}</strong></div><div><span>数据范围</span><strong>{{ compactRange(dashboard.range_start, dashboard.range_end) }}</strong></div></div></article></section>
+    <section class="product-analysis-grid"><article class="panel"><div class="panel-heading"><div><p>系列对比</p><h2>{{ selectedProduct.series || "未分类系列" }}成交贡献</h2></div><span class="panel-action">同系列商品</span></div><BusinessChart v-if="analysis?.peers?.length" :option="peerOption" ariaLabel="同系列商品成交金额对比" :height="300" /><EmptyState v-else title="暂无系列对比" detail="当前商品没有可比较的同系列商品。" /></article><article class="panel product-analysis-detail"><div class="panel-heading"><div><p>商品明细</p><h2>经营与渠道信号</h2></div><ShoppingCart :size="18" /></div><div class="product-analysis-detail-list"><div><span>支付买家</span><strong>{{ number(selectedProduct.buyers) }}</strong></div><div><span>支付转化</span><strong>{{ ratio(selectedConversion) }}</strong></div><div><span>加购 / 收藏</span><strong>{{ number(selectedProduct.add_cart_users) }} / {{ number(selectedProduct.favorite_users) }}</strong></div><div><span>推广 ROI</span><strong>{{ selectedProduct.promotion_spend ? `${(selectedProduct.promotion_attributed_paid_amount / selectedProduct.promotion_spend).toFixed(2)}x` : '--' }}</strong></div><div><span>CPS UV 价值</span><strong>{{ selectedProduct.cps_entry_visitors ? currency(selectedProduct.cps_paid_amount / selectedProduct.cps_entry_visitors) : '--' }}</strong></div><div><span>数据范围</span><strong>{{ compactRange(dashboard.range_start, dashboard.range_end) }}</strong></div></div><p class="panel-footnote">推广和 CPS 都是渠道归因信号；本页并列比较规模与已知费用，不相加为增量或利润。</p></article></section>
     <section class="panel product-analysis-table"><div class="panel-heading"><div><p>商品排名</p><h2>成交贡献明细</h2></div><span class="panel-action">共 {{ number(products.length) }} 个商品</span></div><div class="product-analysis-rows"><div class="product-analysis-row product-analysis-row-head"><span>排名 / 商品</span><span>访客</span><span>买家</span><span>转化</span><span>支付金额</span><span>推广投入</span></div><div v-for="item in productRows" :key="item.product_id" class="product-analysis-row"><strong><i>{{ String(item.rank).padStart(2, "0") }}</i><span>{{ item.product_name }}</span><small>{{ item.product_id }} · {{ item.series || "未分类" }}</small></strong><span>{{ number(item.visitors) }}</span><span>{{ number(item.buyers) }}</span><span>{{ ratio(item.conversionRate) }}</span><span>{{ currency(item.paid_amount) }}</span><span>{{ currency(item.promotion_spend) }}</span></div></div></section>
   </template>
   <section v-else-if="loading" class="loading-panel"><span>正在读取商品日报</span></section>
@@ -168,58 +167,58 @@ onMounted(() => { void load() })
 
 <style scoped>
 .product-analysis-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; margin: 2px 2px 15px; }
-.product-analysis-heading p, .product-analysis-panel p { margin: 0 0 5px; color: #21845f; font-size: 11px; font-weight: 700; }
+.product-analysis-heading p, .product-analysis-panel p { margin: 0 0 5px; color: #21845f; font-size: 12px; font-weight: 700; }
 .product-analysis-heading h1 { margin: 0; color: #20342a; font-size: 24px; font-weight: 750; }
 .product-analysis-heading span { display: block; margin-top: 7px; color: #7e8e85; font-size: 12px; }
-.product-analysis-refresh { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; border: 1px solid #bedaca; border-radius: 4px; padding: 0 10px; color: #176b4b; background: #eff9f3; font-size: 11px; }
+.product-analysis-refresh { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; border: 1px solid #bedaca; border-radius: 4px; padding: 0 10px; color: #176b4b; background: #eff9f3; font-size: 12px; }
 .product-analysis-toolbar { display: flex; align-items: flex-end; gap: 11px; margin-bottom: 16px; border: 1px solid #dce8e1; border-radius: 6px; padding: 13px 15px; background: #fff; }
 .product-analysis-toolbar label { display: grid; gap: 6px; min-width: 150px; }
-.product-analysis-toolbar label span { color: #73837a; font-size: 10px; }
-.product-analysis-toolbar select { width: 100%; min-width: 0; max-width: 100%; min-height: 33px; border: 1px solid #ccdcd2; border-radius: 4px; padding: 0 9px; color: #32483d; background: #fbfdfc; font: inherit; font-size: 11px; }
+.product-analysis-toolbar label span { color: #73837a; font-size: 12px; }
+.product-analysis-toolbar select { width: 100%; min-width: 0; max-width: 100%; min-height: 33px; border: 1px solid #ccdcd2; border-radius: 4px; padding: 0 9px; color: #32483d; background: #fbfdfc; font: inherit; font-size: 12px; }
 .product-analysis-search { position: relative; display: grid; min-width: 260px; flex: 1; gap: 6px; }
-.product-analysis-search > span { color: #73837a; font-size: 10px; }
+.product-analysis-search > span { color: #73837a; font-size: 12px; }
 .product-analysis-search-input { display: flex; min-height: 33px; align-items: center; gap: 7px; border: 1px solid #ccdcd2; border-radius: 4px; padding: 0 8px; color: #75877d; background: #fbfdfc; }
 .product-analysis-search-input:focus-within { border-color: #55a881; box-shadow: 0 0 0 2px rgba(45, 155, 112, .11); background: #fff; }
-.product-analysis-search-input input { width: 100%; min-width: 0; border: 0; outline: 0; color: #32483d; background: transparent; font: inherit; font-size: 11px; }
+.product-analysis-search-input input { width: 100%; min-width: 0; border: 0; outline: 0; color: #32483d; background: transparent; font: inherit; font-size: 12px; }
 .product-analysis-search-input input::-webkit-search-cancel-button { display: none; }
 .product-analysis-search-input button { display: grid; width: 24px; height: 24px; flex: 0 0 auto; place-items: center; border: 0; border-radius: 4px; color: #829188; background: transparent; }
 .product-analysis-search-input button:hover { color: #176b4b; background: #edf7f1; }
 .product-analysis-search-results { position: absolute; z-index: 20; top: calc(100% + 5px); right: 0; left: 0; overflow-y: auto; max-height: 310px; border: 1px solid #cbdcd2; border-radius: 6px; padding: 5px; background: #fff; box-shadow: 0 12px 28px rgba(37, 67, 52, .14); }
 .product-analysis-search-results button { display: grid; width: 100%; gap: 4px; border: 0; border-radius: 4px; padding: 9px 10px; color: #40574a; background: transparent; text-align: left; }
 .product-analysis-search-results button:hover, .product-analysis-search-results button[aria-selected="true"] { background: #eff8f3; }
-.product-analysis-search-results strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.product-analysis-search-results small { overflow: hidden; color: #87958e; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
-.product-analysis-search-results p { margin: 0; padding: 13px 10px; color: #87958e; font-size: 10px; text-align: center; }
+.product-analysis-search-results strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.product-analysis-search-results small { overflow: hidden; color: #87958e; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.product-analysis-search-results p { margin: 0; padding: 13px 10px; color: #87958e; font-size: 12px; text-align: center; }
 .product-analysis-select { min-width: 280px !important; flex: 1; }
-.product-analysis-coverage { margin-left: auto; padding-bottom: 8px; color: #87958e; font-size: 10px; white-space: nowrap; }
+.product-analysis-coverage { margin-left: auto; padding-bottom: 8px; color: #87958e; font-size: 12px; white-space: nowrap; }
 .product-analysis-identity { display: flex; align-items: center; gap: 13px; margin-bottom: 16px; border: 1px solid #cfe4d7; border-radius: 6px; padding: 15px 17px; background: #f7fcf9; }
 .product-analysis-icon { display: grid; width: 44px; height: 44px; flex: 0 0 auto; place-items: center; border: 1px solid #bfe0cc; border-radius: 6px; color: #21845f; background: #eff9f3; }
-.product-analysis-identity p { margin: 0 0 4px; color: #21845f; font-size: 10px; font-weight: 700; }
+.product-analysis-identity p { margin: 0 0 4px; color: #21845f; font-size: 12px; font-weight: 700; }
 .product-analysis-identity h2 { margin: 0; color: #263b30; font-size: 17px; }
-.product-analysis-identity span { display: block; margin-top: 5px; color: #839187; font-size: 10px; }
+.product-analysis-identity span { display: block; margin-top: 5px; color: #839187; font-size: 12px; }
 .product-analysis-meta { display: grid; gap: 3px; margin-left: auto; text-align: right; }
-.product-analysis-meta span, .product-analysis-meta small { color: #829188; font-size: 9px; }
+.product-analysis-meta span, .product-analysis-meta small { color: #829188; font-size: 12px; }
 .product-analysis-meta strong { color: #21845f; font-size: 17px; }
 .product-analysis-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(340px, .85fr); gap: 16px; margin-top: 16px; }
 .product-analysis-grid > .panel { min-width: 0; overflow: hidden; }
 .product-analysis-signals { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; margin-top: 16px; background: #e3ece7; }
 .product-analysis-signals > div { display: grid; gap: 6px; min-height: 90px; padding: 13px; background: #fbfdfc; }
-.product-analysis-signals span, .product-analysis-signals small { color: #84928a; font-size: 9px; }
+.product-analysis-signals span, .product-analysis-signals small { color: #84928a; font-size: 12px; }
 .product-analysis-signals strong { color: #2f4d3e; font-size: 16px; }
 .product-analysis-detail-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; margin-top: 14px; background: #e3ece7; }
 .product-analysis-detail-list div { display: grid; gap: 6px; padding: 13px; background: #fbfdfc; }
-.product-analysis-detail-list span { color: #84928a; font-size: 9px; }
+.product-analysis-detail-list span { color: #84928a; font-size: 12px; }
 .product-analysis-detail-list strong { color: #2f4d3e; font-size: 13px; }
 .product-analysis-table { margin-top: 16px; overflow: hidden; }
 .product-analysis-rows { margin-top: 12px; overflow-x: auto; border: 1px solid #e5ece8; border-radius: 5px; }
-.product-analysis-row { display: grid; grid-template-columns: minmax(280px, 2fr) 90px 90px 90px 130px 130px; min-width: 820px; min-height: 53px; align-items: center; gap: 14px; border-bottom: 1px solid #edf2ef; padding: 0 14px; color: #687970; font-size: 10px; font-variant-numeric: tabular-nums; }
+.product-analysis-row { display: grid; grid-template-columns: minmax(280px, 2fr) 90px 90px 90px 130px 130px; min-width: 820px; min-height: 53px; align-items: center; gap: 14px; border-bottom: 1px solid #edf2ef; padding: 0 14px; color: #687970; font-size: 12px; font-variant-numeric: tabular-nums; }
 .product-analysis-row:last-child { border-bottom: 0; }
 .product-analysis-row > :not(:first-child) { text-align: right; }
-.product-analysis-row strong { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 4px 8px; min-width: 0; color: #40574a; font-size: 11px; text-align: left; }
-.product-analysis-row strong i { grid-row: span 2; color: #89a095; font-size: 9px; font-style: normal; }
+.product-analysis-row strong { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 4px 8px; min-width: 0; color: #40574a; font-size: 12px; text-align: left; }
+.product-analysis-row strong i { grid-row: span 2; color: #89a095; font-size: 12px; font-style: normal; }
 .product-analysis-row strong span, .product-analysis-row strong small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.product-analysis-row strong small { color: #94a199; font-size: 9px; font-weight: 400; }
-.product-analysis-row-head { min-height: 34px; color: #96a29b; background: #f7faf8; font-size: 9px; font-weight: 650; }
+.product-analysis-row strong small { color: #94a199; font-size: 12px; font-weight: 400; }
+.product-analysis-row-head { min-height: 34px; color: #96a29b; background: #f7faf8; font-size: 12px; font-weight: 650; }
 @media (max-width: 900px) { .product-analysis-grid { grid-template-columns: 1fr; } }
 @media (max-width: 900px) { .product-analysis-toolbar { flex-wrap: wrap; } .product-analysis-search { min-width: 300px; } .product-analysis-coverage { width: 100%; margin-left: 0; padding-bottom: 0; } }
 @media (max-width: 650px) { .product-analysis-heading { align-items: flex-start; flex-direction: column; } .product-analysis-toolbar { align-items: stretch; } .product-analysis-toolbar label, .product-analysis-select, .product-analysis-search { width: 100%; min-width: 0 !important; max-width: 100%; flex-basis: 100%; } .product-analysis-identity { align-items: flex-start; flex-wrap: wrap; } .product-analysis-meta { width: 100%; margin-left: 57px; text-align: left; } .product-analysis-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

@@ -38,31 +38,6 @@ the requested business day. The 2026-07-04 data overview screenshot confirms
 `realPayrealRfdRate` as `签收退款率`: raw `0.006334459...` renders as `0.63%`.
 `sucRefundRate` is kept separately as `成功退款率`.
 
-The second mapper is `sycm_flow_overview.py`. It reads saved response shapes
-from `/flow/new/guide/trend/overview.json` and writes only long-form metrics
-with the `flow.` prefix. This keeps the flow-board values separate from the
-home-page overview values for the same business day.
-
-Current flow overview BI fields:
-
-- `flow.uv` -> `访客数`
-- `flow.itmUv` -> `商品访客数`
-- `flow.payByrCnt` -> `支付买家数`
-- `flow.pv` -> `浏览量`
-- `flow.avgPv` -> `人均浏览量`
-- `flow.oldUv` -> `老访客数`
-- `flow.newUv` -> `新访客数`
-- `flow.shopCltByrCnt` -> `关注店铺人数`
-- `flow.liveRoomUv` -> `直播间访客数`
-- `flow.shortVideoUv` -> `短视频访客数`
-- `flow.imageUv` -> `图文访客数`
-- `flow.shopVisitUv` -> `店铺页访客数`
-
-`跳失率` and the flow endpoint's own `平均停留时长` are still treated as
-field candidates until a response body containing those metric values is
-captured. The BI view can fall back to the home-page `stayTime` metric for
-`平均停留时长` when a same-day overview response has already been ingested.
-
 The Datawar activity calendar endpoint
 `/datawar/v4/activity/actList/getActivityCalendar.json` is stored in the
 separate `store_activity_calendar_events` table. It keeps only the business

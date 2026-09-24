@@ -162,6 +162,7 @@ const calendarCells = computed<CalendarCell[]>(() => {
 })
 const selectedRangeLabel = computed(() => props.startDate && props.endDate ? compactRange(props.startDate, props.endDate) : "等待选择")
 const latestDataLabel = computed(() => availableEndDate.value ? shortDate(availableEndDate.value) : "--")
+const showLatestDate = computed(() => Boolean(props.latestDate && props.endDate && props.latestDate !== props.endDate))
 const dropdownTitle = computed(() => {
   if (rangeMode.value === "日") return "选择统计日期"
   if (rangeMode.value === "周") return "选择任意日期，按自然周汇总"
@@ -185,7 +186,7 @@ function isSelectedDay(value: string): boolean {
     </div>
 
     <form class="date-filter calendar-date-filter" aria-label="业务日期筛选" @submit.prevent="submitCustomRange" @click="dropdownOpen = false">
-      <div class="context-query-heading"><CalendarDays :size="17" /><div><strong>统计范围</strong><span>{{ selectedRangeLabel }}</span></div><small>最新有效日 {{ latestDataLabel }}</small></div>
+      <div class="context-query-heading"><CalendarDays :size="17" /><div><strong>统计范围</strong><span>{{ selectedRangeLabel }}</span></div><small v-if="showLatestDate">最新有效日 {{ latestDataLabel }}</small></div>
 
       <div class="range-picker-shell" @click.stop>
         <div class="range-segmented" role="tablist" aria-label="快捷时间范围">
